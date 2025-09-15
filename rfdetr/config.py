@@ -117,6 +117,20 @@ class RFDETRMediumV3Config(RFDETRBaseConfig):
     # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3.pth"
     pretrain_weights: Optional[str] = None
 
+class RFDETRMediumV3PlusConfig(RFDETRBaseConfig):
+    """
+    The configuration for an RF-DETR Medium DinoV3 Plus model.
+    """
+    encoder: Literal["dinov3_windowed_small","dinov3_windowed_smallplus", "dinov3_windowed_base"] = "dinov3_windowed_smallplus"
+    out_feature_indexes: List[int] = [3, 6, 9, 12]
+    num_windows: int = 2
+    dec_layers: int = 4
+    patch_size: int = 16
+    resolution: int = 576
+    positional_encoding_size: int = 36
+    # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3-plus.pth"
+    pretrain_weights: Optional[str] = None
+
 class RFDETRNanoV3Config(RFDETRBaseConfig):
     """
     The configuration for an RF-DETR Nano DinoV3 model.

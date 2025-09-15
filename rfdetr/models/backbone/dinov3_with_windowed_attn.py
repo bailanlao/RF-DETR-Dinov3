@@ -9,7 +9,7 @@
 
 import collections.abc
 import math
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union,Callable
 
 import torch
 from torch import nn
@@ -54,7 +54,23 @@ dtype_dict = {
 class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
 
     model_type = "dinov3_with_registers"
-
+    DYNAMIC_CLASS_MAPPING: Dict[str, Dict[str, Callable[..., nn.Module]]] = {
+        "norm_layer": {
+            "LayerNorm": nn.LayerNorm,
+        },
+        "attn_class": {
+            "SelfAttention": SelfAttention,
+        },
+        "ffn_layer": {
+            "Mlp": Mlp,
+            "SwiGLUFFN": SwiGLUFFN, # hidden_features = d × 3 / 2
+        },
+        "act_layer": {
+            "GELU": nn.GELU,
+            "SiLU": nn.SiLU,
+            "ReLU": nn.ReLU,
+        }
+    }
     def __init__(
         self,
         hidden_size=768,
@@ -90,6 +106,10 @@ class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
         pos_embed_rope_jitter_coords: float | None = None,
         pos_embed_rope_rescale_coords: float | None = None,
         pos_embed_rope_dtype: str = "fp32",
+        dynamic_norm_layer: str | None = None,
+        dynamic_attn_class: str | None = None,
+        dynamic_ffn_layer: str | None = None,
+        dynamic_act_layer: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -130,6 +150,33 @@ class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
         self.window_block_indexes = list(range(num_hidden_layers)) if window_block_indexes is None else window_block_indexes
         self.gradient_checkpointing = gradient_checkpointing
 
+        if dynamic_norm_layer is not None:
+            if dynamic_norm_layer not in self.DYNAMIC_CLASS_MAPPING["norm_layer"]:
+                raise ValueError(f"不支持的归一化层：{dynamic_norm_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['norm_layer'].keys())}")
+            self.norm_layer = self.DYNAMIC_CLASS_MAPPING["norm_layer"][dynamic_norm_layer]
+        else:
+            self.norm_layer = nn.LayerNorm
+
+        if dynamic_attn_class is not None:
+            if dynamic_attn_class not in self.DYNAMIC_CLASS_MAPPING["attn_class"]:
+                raise ValueError(f"不支持的注意力层：{dynamic_attn_class}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['attn_class'].keys())}")
+            self.attn_class = self.DYNAMIC_CLASS_MAPPING["attn_class"][dynamic_attn_class]
+        else:
+            self.attn_class = SelfAttention  
+
+        if dynamic_ffn_layer is not None:
+            if dynamic_ffn_layer not in self.DYNAMIC_CLASS_MAPPING["ffn_layer"]:
+                raise ValueError(f"不支持的FFN层：{dynamic_ffn_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['ffn_layer'].keys())}")
+            self.ffn_layer = self.DYNAMIC_CLASS_MAPPING["ffn_layer"][dynamic_ffn_layer]
+        else:
+            self.ffn_layer = SwiGLUFFN if self.use_swiglu_ffn else Mlp
+
+        if dynamic_act_layer is not None:
+            if dynamic_act_layer not in self.DYNAMIC_CLASS_MAPPING["act_layer"]:
+                raise ValueError(f"不支持的激活函数：{dynamic_act_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['act_layer'].keys())}")
+            self.act_layer = self.DYNAMIC_CLASS_MAPPING["act_layer"][dynamic_act_layer]
+        else:
+            self.act_layer = nn.GELU
 
 class Dinov3WithRegistersPatchEmbeddings(nn.Module):
     """
@@ -476,28 +523,32 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
         super().__init__()
 
         self.num_windows = config.num_windows
+        norm_layer: Callable[..., nn.Module] = config.norm_layer if hasattr(config, 'norm_layer') else nn.LayerNorm
+        attn_class: Callable[..., nn.Module] = config.attn_class if hasattr(config, 'attn_class') else SelfAttention
+        ffn_layer: Callable[..., nn.Module] = config.ffn_layer if hasattr(config, 'ffn_layer') else Mlp
+        act_layer: Callable[..., nn.Module] = config.act_layer if hasattr(config, 'act_layer') else nn.GELU
 
-        self.norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps) # d
-        self.attn = SelfAttention(
+        self.norm1 = norm_layer(config.hidden_size, eps=config.layer_norm_eps) # d
+        self.attn = attn_class(
             config.hidden_size, 
-            config.num_attention_heads, 
-            config.qkv_bias,
-            config.proj_bias,
+            num_heads=config.num_attention_heads, 
+            qkv_bias=config.qkv_bias,
+            proj_bias=config.proj_bias,
             attn_drop=config.attention_probs_dropout_prob,
             proj_drop=config.attention_probs_dropout_prob,
             mask_k_bias=config.mask_k_bias,
-            )
+        )
+
         self.ls1 = LayerScale(config.hidden_size)
 
-        self.norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-
-        self.mlp = Mlp(
+        self.norm2 = norm_layer(config.hidden_size, eps=config.layer_norm_eps)
+        self.mlp = ffn_layer(
             config.hidden_size,
             hidden_features=config.mlp_ratio*config.hidden_size,
-            act_layer=nn.GELU,
+            act_layer=act_layer,
             drop=config.hidden_dropout_prob,
             bias=config.ffn_bias,
-            )
+        )
         self.ls2 = LayerScale(config.hidden_size)
 
     def forward(

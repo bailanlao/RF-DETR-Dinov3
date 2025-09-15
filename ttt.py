@@ -1,6 +1,6 @@
 from rfdetr.models.backbone.dinov2 import DinoV2
 from rfdetr.models.backbone.dinov3 import DinoV3
-from rfdetr import RFDETRNano, RFDETRBase, RFDETRMedium, RFDETRLarge, RFDETRMediumV3, RFDETRNanoV3
+from rfdetr import RFDETRNano, RFDETRBase, RFDETRMedium, RFDETRLarge, RFDETRMediumV3, RFDETRNanoV3,RFDETRMediumV3Plus
 import torch
 
 def print_instance_attributes(obj, indent=0, max_depth=3):
@@ -54,12 +54,12 @@ if __name__ == "__main__":
     # print(dino_encoder)
     dinov3=torch.hub.load(
         'D:/__easyHelper__/dinov3-main', 
-        'dinov3_vits16', 
+        'dinov3_vits16plus', 
         source='local', 
-        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16.pth'
+        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16plus.pth'
     )
     print("dinov3")
-    print(dinov3)
+    # print(dinov3)
 
     dinov3sp=torch.hub.load(
         'D:/__easyHelper__/dinov3-main', 
@@ -69,9 +69,10 @@ if __name__ == "__main__":
     )
     print("dinov3smallplus")
     print(dinov3sp)
-    model=RFDETRNanoV3()
+    model=RFDETRMediumV3Plus()
     dinov3_core_model=model.model.model.to(device)
     dinov3_encoder = dinov3_core_model.backbone[0].encoder
+    print(dinov3_encoder)
     x = torch.randn(1, 3, 640, 640).to(device)
     # print(dinov3_encoder(x)) # 前向传播测试
     for j in dinov3_encoder(x):
