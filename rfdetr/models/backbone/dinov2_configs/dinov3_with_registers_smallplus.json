@@ -25,7 +25,7 @@
     "interpolate_offset": 0.0,
     "layer_norm_eps": 1e-05,
     "layerscale_value": 1.0,
-    "mlp_ratio": 4,
+    "mlp_ratio": 6,
     "model_type": "dinov3_with_registers",
     "num_attention_heads": 6,
     "num_channels": 3,

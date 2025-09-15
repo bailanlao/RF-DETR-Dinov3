@@ -563,8 +563,8 @@ def build_transformer(args):
         two_stage = args.two_stage
     except:
         two_stage = False
-    print("Transformer args:")
-    print(args)
+    # print("Transformer args:")
+    # print(args)
     return Transformer(
         d_model=args.hidden_dim,
         sa_nhead=args.sa_nheads,

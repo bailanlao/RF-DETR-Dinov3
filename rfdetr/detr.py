@@ -31,6 +31,7 @@ from rfdetr.config import (
     RFDETRMediumConfig,
     RFDETRNanoV3Config,
     RFDETRMediumV3Config,
+    RFDETRMediumV3PlusConfig,
     TrainConfig,
     ModelConfig
 )
@@ -469,6 +470,17 @@ class RFDETRMediumV3(RFDETR):
     size = "rfdetr-mediumv3"
     def get_model_config(self, **kwargs):
         return RFDETRMediumV3Config(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return TrainConfig(**kwargs)
+
+class RFDETRMediumV3Plus(RFDETR):
+    """
+    Train an RF-DETR Medium DinoV3 model.
+    """
+    size = "rfdetr-mediumv3"
+    def get_model_config(self, **kwargs):
+        return RFDETRMediumV3PlusConfig(**kwargs)
 
     def get_train_config(self, **kwargs):
         return TrainConfig(**kwargs)

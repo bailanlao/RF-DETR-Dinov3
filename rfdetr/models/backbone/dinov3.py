@@ -19,18 +19,21 @@ from .dinov3_with_windowed_attn import WindowedDinov3WithRegistersConfig, Window
 size_to_width = {
     "tiny": 192,
     "small": 384,
+    "smallplus": 384,
     "base": 768,
     "large": 1024,
 }
 
 size_to_config = {
     "small": "dinov3_small.json",
+    "smallplus": "dinov3_smallplus.json",
     "base": "dinov3_base.json",
     "large": "dinov3_large.json",
 }
 
 size_to_config_with_registers = {
     "small": "dinov3_with_registers_small.json",
+    "smallplus": "dinov3_with_registers_smallplus.json",
     "base": "dinov3_with_registers_base.json",
     "large": "dinov3_with_registers_large.json",
 }
