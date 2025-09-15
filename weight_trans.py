@@ -218,52 +218,163 @@ def transfer_dinov3_to_core_model(
     
     return dinov3_core_model, transfer_log, total_params
 
+import torch
+from collections import OrderedDict
+
+def transfer_rf_to_dinov3(rf_model, dinov3_model):
+    """
+    将RF（DinoV2骨干）模型的参数迁移到Dinov3模型中，仅迁移embeddings和projector模块，不包含encoder.layer相关参数。
+    
+    Args:
+        rf_model: RF-DETR的Backbone模块（rfdetr_core_model.backbone[0]）
+        dinov3_model: Dinov3的Backbone模块（dinov3_core_model.backbone[0]）
+    
+    Returns:
+        torch.nn.Module: 参数迁移后的Dinov3模型
+    """
+    rf_state_dict = rf_model.state_dict()
+    dinov3_state_dict = dinov3_model.state_dict()
+    new_dinov3_state = OrderedDict()
+
+    # 参数映射：仅包含embeddings和projector模块，移除所有encoder.layer相关映射
+    param_mapping = {
+        # -------------------------- embeddings模块（核心迁移）--------------------------
+        # 位置编码
+        "encoder.encoder.embeddings.position_embeddings": 
+            "encoder.encoder.embeddings.position_embeddings",
+        # CLS令牌
+        "encoder.encoder.embeddings.cls_token": 
+            "encoder.encoder.embeddings.cls_token",
+        # 掩码令牌
+        "encoder.encoder.embeddings.mask_token": 
+            "encoder.encoder.embeddings.mask_token",
+        # 寄存器令牌
+        "encoder.encoder.embeddings.register_tokens": 
+            "encoder.encoder.embeddings.register_tokens",
+        # 补丁嵌入
+        "encoder.encoder.embeddings.patch_embeddings.projection.weight": 
+            "encoder.encoder.embeddings.patch_embeddings.projection.weight",
+        "encoder.encoder.embeddings.patch_embeddings.projection.bias": 
+            "encoder.encoder.embeddings.patch_embeddings.projection.bias",
+        
+        # -------------------------- 最终层归一化（非layer部分）--------------------------
+        "encoder.encoder.layernorm.weight": 
+            "encoder.encoder.layernorm.weight",
+        "encoder.encoder.layernorm.bias": 
+            "encoder.encoder.layernorm.bias",
+        
+        # -------------------------- Projector模块 --------------------------
+        "projector.stages.0.0.cv1.conv.weight": 
+            "projector.stages.0.0.cv1.conv.weight",
+        "projector.stages.0.0.cv1.bn.weight": 
+            "projector.stages.0.0.cv1.bn.weight",
+        "projector.stages.0.0.cv1.bn.bias": 
+            "projector.stages.0.0.cv1.bn.bias",
+        "projector.stages.0.0.cv2.conv.weight": 
+            "projector.stages.0.0.cv2.conv.weight",
+        "projector.stages.0.0.cv2.bn.weight": 
+            "projector.stages.0.0.cv2.bn.weight",
+        "projector.stages.0.0.cv2.bn.bias": 
+            "projector.stages.0.0.cv2.bn.bias",
+        # Bottleneck模块（3个）
+        "projector.stages.0.0.m.{m}.cv1.conv.weight": 
+            "projector.stages.0.0.m.{m}.cv1.conv.weight",
+        "projector.stages.0.0.m.{m}.cv1.bn.weight": 
+            "projector.stages.0.0.m.{m}.cv1.bn.weight",
+        "projector.stages.0.0.m.{m}.cv1.bn.bias": 
+            "projector.stages.0.0.m.{m}.cv1.bn.bias",
+        "projector.stages.0.0.m.{m}.cv2.conv.weight": 
+            "projector.stages.0.0.m.{m}.cv2.conv.weight",
+        "projector.stages.0.0.m.{m}.cv2.bn.weight": 
+            "projector.stages.0.0.m.{m}.cv2.bn.weight",
+        "projector.stages.0.0.m.{m}.cv2.bn.bias": 
+            "projector.stages.0.0.m.{m}.cv2.bn.bias",
+        # Projector最终层归一化
+        "projector.stages.0.1.weight": 
+            "projector.stages.0.1.weight",
+        "projector.stages.0.1.bias": 
+            "projector.stages.0.1.bias",
+    }
+
+    # 1. 处理Projector中的Bottleneck模块（含{m}循环变量）
+    num_bottlenecks = 3  # 固定3个Bottleneck
+    for m in range(num_bottlenecks):
+        for dinov3_key_pattern, rf_key_pattern in param_mapping.items():
+            if "{m}" not in dinov3_key_pattern:
+                continue  # 只处理含{m}的参数
+            
+            dinov3_key = dinov3_key_pattern.format(m=m)
+            if dinov3_key not in dinov3_state_dict:
+                continue  # Dinov3中无此参数
+            
+            rf_key = rf_key_pattern.format(m=m)
+            if rf_key not in rf_state_dict:
+                continue  # RF中无此参数
+            
+            # 验证形状并迁移
+            if rf_state_dict[rf_key].shape == dinov3_state_dict[dinov3_key].shape:
+                new_dinov3_state[dinov3_key] = rf_state_dict[rf_key]
+                print(f"✅ 迁移Bottleneck {m}：{dinov3_key}")
+            else:
+                print(f"⚠️ 跳过Bottleneck {m}：{dinov3_key}（形状不匹配）")
+
+    # 2. 处理无循环变量的模块（embeddings和固定结构）
+    for dinov3_key, rf_key in param_mapping.items():
+        # 跳过含循环变量的参数（已处理）
+        if "{m}" in dinov3_key:
+            continue
+        
+        if dinov3_key not in dinov3_state_dict:
+            continue  # Dinov3中无此参数
+        
+        # 从RF获取参数（非函数类型映射）
+        if not callable(rf_key) and rf_key in rf_state_dict:
+            rf_param = rf_state_dict[rf_key]
+            # 验证形状
+            if rf_param.shape == dinov3_state_dict[dinov3_key].shape:
+                new_dinov3_state[dinov3_key] = rf_param
+                print(f"✅ 迁移：{dinov3_key}")
+            else:
+                print(f"⚠️ 跳过：{dinov3_key}（形状不匹配，RF: {rf_param.shape}, Dinov3: {dinov3_state_dict[dinov3_key].shape}）")
+
+
+    # 3. 保留Dinov3所有未匹配的参数（尤其是encoder.layer相关参数）
+    for dinov3_key in dinov3_state_dict:
+        if dinov3_key not in new_dinov3_state:
+            new_dinov3_state[dinov3_key] = dinov3_state_dict[dinov3_key]
+
+    # 加载迁移后的参数
+    dinov3_model.load_state_dict(new_dinov3_state, strict=False)
+    print("\n🎉 迁移完成！已跳过所有encoder.layer相关参数")
+    return dinov3_model
+
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
-    # model = DinoV2(out_feature_indexes=[2, 4, 5, 9],load_dinov2_weights=False)
-    # model.export()
-    # x = torch.randn(1, 3, 840, 840)
-    # print(model(x))
-    # for j in model(x):
-    #     print(j.shape)
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # rfdetr = RFDETRNano(pretrain_weights='D:/__easyHelper__/RF-DETR/rfdetr/checkpoint/nano-coco.pth')
-    # core_model = rfdetr.model.model.to(device)
-    # dino_encoder = core_model.backbone[0].encoder.encoder.encoder
-    # print(dino_encoder)
-    # dinov3=torch.hub.load(
-    #     'D:/__easyHelper__/RF-DETR/dinov3-main', 
-    #     'dinov3_vits16', 
-    #     source='local', 
-    #     weights='D:/__easyHelper__/RF-DETR/dinov3-main/checkpoint/dinov3_vits16.pth'
-    # )
-    # print("dinov3")
-    # print(dinov3)
-    # print(dinov3.blocks[0].ls1.inplace)
-    # print(dinov3.blocks[0].ls1.init_values)
-    # print(dinov3.blocks[0].ls2.inplace)
-    # print(dinov3.blocks[0].ls2.init_values)
-    save_path='rf-detr-nano-dinov3.pth'
-    model=RFDETRNanoV3()
-    rfdetr = RFDETRNano(pretrain_weights='D:/__easyHelper__/RF-DETR/rfdetr/checkpoint/nano-coco.pth')
+    save_path='medium-dinov3.pth'
+    model=RFDETRMediumV3()
+    rfdetr = RFDETRMedium(pretrain_weights='D:/__easyHelper__/RF-DETR/rfdetr/checkpoint/medium-coco.pth')
+    dinov3=torch.hub.load(
+        'D:/__easyHelper__/dinov3-main', 
+        'dinov3_vits16', 
+        source='local', 
+        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16.pth'
+    )
     rfdetr_core_model=rfdetr.model.model.to(device)
     dinov3_core_model=model.model.model.to(device)
-    print("dinov3",dinov3_core_model)
-    print("rfdetr",rfdetr_core_model)
     dinov3_core_model, transfer_log, total_params = transfer_rfdetr_to_dinov3_weights(
         rfdetr_core_model=rfdetr_core_model,
         dinov3_core_model=dinov3_core_model,
         device=None,  # 自动选择GPU/CPU
         transfer_top_heads=False  # 迁移顶层任务头
-    ) # 能用
+    ) # 迁移非encoder的部分
+    transfer_rf_to_dinov3(
+        rfdetr_core_model.backbone[0],
+        dinov3_core_model.backbone[0],
+    ) # 迁移encoder中其他部分
     dinov3_encoder = dinov3_core_model.backbone[0].encoder.encoder.encoder
-    dinov3=torch.hub.load(
-        'D:/__easyHelper__/RF-DETR/dinov3-main', 
-        'dinov3_vits16', 
-        source='local', 
-        weights='D:/__easyHelper__/RF-DETR/dinov3-main/checkpoint/dinov3_vits16.pth'
-    )
+
     print("dinov3参数量：",count_module_params(dinov3))
 
     updated_core_model, transfer_log, total_params = transfer_dinov3_to_core_model(

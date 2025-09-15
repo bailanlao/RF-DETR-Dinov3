@@ -42,8 +42,8 @@ class LWDETR(nn.Module):
                  transformer,
                  num_classes,
                  num_queries,
-                 aux_loss=False,
-                 group_detr=1,
+                 aux_loss=True,
+                 group_detr=13,
                  two_stage=False,
                  lite_refpoint_refine=False,
                  bbox_reparam=False):
@@ -161,7 +161,8 @@ class LWDETR(nn.Module):
             query_feat_weight = self.query_feat.weight[:self.num_queries]
 
         hs, ref_unsigmoid, hs_enc, ref_enc = self.transformer(
-            srcs, masks, poss, refpoint_embed_weight, query_feat_weight)
+            srcs, masks, poss, refpoint_embed_weight, query_feat_weight
+            )
 
         if hs is not None:
             if self.bbox_reparam:

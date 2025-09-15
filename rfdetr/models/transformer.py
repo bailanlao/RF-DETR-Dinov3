@@ -218,13 +218,16 @@ class Transformer(nn.Module):
         if masks is not None:
             mask_flatten = torch.cat(mask_flatten, 1)   # bs, \sum{hxw}
             valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
+        
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c 
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=memory.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        # get the index of flatten tensor
         
         if self.two_stage:
             output_memory, output_proposals = gen_encoder_output_proposals(
-                memory, mask_flatten, spatial_shapes, unsigmoid=not self.bbox_reparam)
+                memory, mask_flatten, spatial_shapes, unsigmoid=not self.bbox_reparam
+            )
             # group detr for first stage
             refpoint_embed_ts, memory_ts, boxes_ts = [], [], []
             group_detr = self.group_detr if self.training else 1
@@ -560,7 +563,8 @@ def build_transformer(args):
         two_stage = args.two_stage
     except:
         two_stage = False
-
+    print("Transformer args:")
+    print(args)
     return Transformer(
         d_model=args.hidden_dim,
         sa_nhead=args.sa_nheads,
