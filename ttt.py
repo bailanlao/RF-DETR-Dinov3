@@ -1,7 +1,42 @@
 from rfdetr.models.backbone.dinov2 import DinoV2
 from rfdetr.models.backbone.dinov3 import DinoV3
-from rfdetr import RFDETRNano, RFDETRBase, RFDETRMedium, RFDETRLarge, RFDETRMediumV3,RFDETRNanoV3
+from rfdetr import RFDETRNano, RFDETRBase, RFDETRMedium, RFDETRLarge, RFDETRMediumV3, RFDETRNanoV3
 import torch
+
+def print_instance_attributes(obj, indent=0, max_depth=3):
+    
+    indent_str = "  " * indent
+    print(f"{indent_str}{type(obj).__name__}(")
+    
+    # 获取对象的属性
+    if hasattr(obj, '__dict__'):
+        attributes = obj.__dict__
+    else:
+        attributes = {}
+    
+    # 处理PyTorch模块的子模块
+    if hasattr(obj, 'named_children'):
+        for name, child in obj.named_children():
+            if indent < max_depth:
+                print(f"{indent_str}  ({name}): ", end="")
+                print_instance_attributes(child, indent + 1, max_depth)
+            else:
+                print(f"{indent_str}  ({name}): {type(child).__name__}(...)")
+    
+    # 打印其他属性
+    for name, value in attributes.items():
+        # 跳过已经通过named_children显示的子模块
+        if hasattr(obj, 'named_children') and name in [n for n, _ in obj.named_children()]:
+            continue
+        
+        # 简单值直接打印，复杂对象只打印类型
+        if isinstance(value, (int, float, str, bool, NoneType)):
+            print(f"{indent_str}  {name}: {value}")
+        else:
+            print(f"{indent_str}  {name}: {type(value).__name__}")
+    
+    print(f"{indent_str})")
+
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -17,24 +52,27 @@ if __name__ == "__main__":
     # core_model = rfdetr.model.model.to(device)
     # dino_encoder = core_model.backbone[0].encoder.encoder.encoder
     # print(dino_encoder)
-    # dinov3=torch.hub.load(
-    #     'D:/__easyHelper__/RF-DETR/dinov3-main', 
-    #     'dinov3_vits16', 
-    #     source='local', 
-    #     weights='D:/__easyHelper__/RF-DETR/dinov3-main/checkpoint/dinov3_vits16.pth'
-    # )
-    # print("dinov3")
-    # print(dinov3)
-    # print(dinov3.blocks[0].ls1.inplace)
-    # print(dinov3.blocks[0].ls1.init_values)
-    # print(dinov3.blocks[0].ls2.inplace)
-    # print(dinov3.blocks[0].ls2.init_values)
-    model=RFDETRNanoV3(pretrain_weights='rf-detr-nano-dinov3.pth')
+    dinov3=torch.hub.load(
+        'D:/__easyHelper__/dinov3-main', 
+        'dinov3_vits16', 
+        source='local', 
+        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16.pth'
+    )
+    print("dinov3")
+    print(dinov3)
+
+    dinov3sp=torch.hub.load(
+        'D:/__easyHelper__/dinov3-main', 
+        'dinov3_vits16plus', 
+        source='local', 
+        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16plus.pth'
+    )
+    print("dinov3smallplus")
+    print(dinov3sp)
+    model=RFDETRNanoV3()
     dinov3_core_model=model.model.model.to(device)
-    # print(dinov3_core_model)
     dinov3_encoder = dinov3_core_model.backbone[0].encoder
-    # print(dinov3_encoder)
     x = torch.randn(1, 3, 640, 640).to(device)
-    print(dinov3_encoder(x)) # 前向传播测试
+    # print(dinov3_encoder(x)) # 前向传播测试
     for j in dinov3_encoder(x):
         print(j.shape)
