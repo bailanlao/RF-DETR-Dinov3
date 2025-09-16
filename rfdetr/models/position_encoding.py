@@ -104,8 +104,8 @@ class PositionEmbeddingLearned(nn.Module):
     """
     def __init__(self, num_pos_feats=256):
         super().__init__()
-        self.row_embed = nn.Embedding(50, num_pos_feats)
-        self.col_embed = nn.Embedding(50, num_pos_feats)
+        self.row_embed = nn.Embedding(60, num_pos_feats)
+        self.col_embed = nn.Embedding(60, num_pos_feats)
         self.reset_parameters()
         self._export = False
     
@@ -116,18 +116,60 @@ class PositionEmbeddingLearned(nn.Module):
         nn.init.uniform_(self.row_embed.weight)
         nn.init.uniform_(self.col_embed.weight)
 
-    def forward(self, tensor_list: NestedTensor):
+    # def forward(self, tensor_list: NestedTensor, align_dim_orders = False):
+    #     x = tensor_list.tensors
+    #     h, w = x.shape[:2]
+    #     i = torch.arange(w, device=x.device)
+    #     j = torch.arange(h, device=x.device)
+    #     x_emb = self.col_embed(i)
+    #     y_emb = self.row_embed(j)
+    #     pos = torch.cat([
+    #         x_emb.unsqueeze(0).repeat(h, 1, 1),
+    #         y_emb.unsqueeze(1).repeat(1, w, 1),
+    #     ], dim=-1).unsqueeze(2).repeat(1, 1, x.shape[2], 1)
+    #     # return: (H, W, bs, C)
+    #     return pos
+    def forward(self, tensor_list: NestedTensor, align_dim_orders = False):
         x = tensor_list.tensors
-        h, w = x.shape[:2]
+        # print(f"Input tensor shape: {x.shape}")
+        
+        h, w = x.shape[2:]
+        # print(f"Feature map dimensions - height: {h}, width: {w}")
+        
         i = torch.arange(w, device=x.device)
         j = torch.arange(h, device=x.device)
-        x_emb = self.col_embed(i)
-        y_emb = self.row_embed(j)
+        # print(f"Column indices (i) range: [{i.min().item()}, {i.max().item()}], length: {len(i)}")
+        # print(f"Row indices (j) range: [{j.min().item()}, {j.max().item()}], length: {len(j)}")
+        
+        max_col_index = self.col_embed.num_embeddings - 1
+        max_row_index = self.row_embed.num_embeddings - 1
+        # print(f"Max valid column index (col_embed): {max_col_index}")
+        # print(f"Max valid row index (row_embed): {max_row_index}")
+        
+        if i.max() > max_col_index:
+            print(f"WARNING: Column index {i.max()} exceeds max valid index {max_col_index}")
+        if j.max() > max_row_index:
+            print(f"WARNING: Row index {j.max()} exceeds max valid index {max_row_index}")
+        
+        try:
+            x_emb = self.col_embed(i)
+            # print(f"Column embedding shape: {x_emb.shape}")
+        except Exception as e:
+            print(f"Error in col_embed lookup: {e}")
+            raise
+        
+        try:
+            y_emb = self.row_embed(j)
+            # print(f"Row embedding shape: {y_emb.shape}")
+        except Exception as e:
+            print(f"Error in row_embed lookup: {e}")
+            raise
+        
         pos = torch.cat([
             x_emb.unsqueeze(0).repeat(h, 1, 1),
             y_emb.unsqueeze(1).repeat(1, w, 1),
-        ], dim=-1).unsqueeze(2).repeat(1, 1, x.shape[2], 1)
-        # return: (H, W, bs, C)
+        ], dim=-1).unsqueeze(2).repeat(1, 1, x.shape[0], 1)
+        
         return pos
 
 
@@ -138,6 +180,7 @@ def build_position_encoding(hidden_dim, position_embedding):
         position_embedding = PositionEmbeddingSine(N_steps, normalize=True)
     elif position_embedding in ('v3', 'learned'):
         position_embedding = PositionEmbeddingLearned(N_steps)
+        print("position_embedding",position_embedding)
     else:
         raise ValueError(f"not supported {position_embedding}")
 

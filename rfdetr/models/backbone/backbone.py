@@ -67,6 +67,7 @@ class Backbone(BackboneBase):
         # assert name_parts[0] == "dinov2"
         size = name_parts[-1]
         use_registers = False
+        # print(name_parts)
         if "registers" in name_parts:
             use_registers = True
             name_parts.remove("registers")
@@ -139,8 +140,10 @@ class Backbone(BackboneBase):
     def forward(self, tensor_list: NestedTensor):
         """ """
         # (H, W, B, C)
+        # print(self.projector_scale)
         feats = self.encoder(tensor_list.tensors)
         feats = self.projector(feats)
+        
         # x: [(B, C, H, W)]
         out = []
         for feat in feats:
