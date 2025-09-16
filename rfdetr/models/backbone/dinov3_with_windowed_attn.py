@@ -297,7 +297,7 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, embeddings), dim=1)
 
-        embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
+        # embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
 
         if self.config.num_windows > 1:
             # reshape for windows

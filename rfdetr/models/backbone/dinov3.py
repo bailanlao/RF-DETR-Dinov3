@@ -103,6 +103,7 @@ class DinoV3(nn.Module):
                 load_dino_weights = False
             # print(dino_config)
             if use_registers:
+                print("use registers")
                 windowed_dino_config = WindowedDinov3WithRegistersConfig(
                     **dino_config,
                     num_windows=num_windows,
