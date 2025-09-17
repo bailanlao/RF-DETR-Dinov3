@@ -104,8 +104,8 @@ class PositionEmbeddingLearned(nn.Module):
     """
     def __init__(self, num_pos_feats=256):
         super().__init__()
-        self.row_embed = nn.Embedding(60, num_pos_feats)
-        self.col_embed = nn.Embedding(60, num_pos_feats)
+        self.row_embed = nn.Embedding(120, num_pos_feats)
+        self.col_embed = nn.Embedding(120, num_pos_feats)
         self.reset_parameters()
         self._export = False
     
@@ -131,20 +131,13 @@ class PositionEmbeddingLearned(nn.Module):
     #     return pos
     def forward(self, tensor_list: NestedTensor, align_dim_orders = False):
         x = tensor_list.tensors
-        # print(f"Input tensor shape: {x.shape}")
-        
         h, w = x.shape[2:]
-        # print(f"Feature map dimensions - height: {h}, width: {w}")
         
         i = torch.arange(w, device=x.device)
         j = torch.arange(h, device=x.device)
-        # print(f"Column indices (i) range: [{i.min().item()}, {i.max().item()}], length: {len(i)}")
-        # print(f"Row indices (j) range: [{j.min().item()}, {j.max().item()}], length: {len(j)}")
         
         max_col_index = self.col_embed.num_embeddings - 1
         max_row_index = self.row_embed.num_embeddings - 1
-        # print(f"Max valid column index (col_embed): {max_col_index}")
-        # print(f"Max valid row index (row_embed): {max_row_index}")
         
         if i.max() > max_col_index:
             print(f"WARNING: Column index {i.max()} exceeds max valid index {max_col_index}")
@@ -153,14 +146,11 @@ class PositionEmbeddingLearned(nn.Module):
         
         try:
             x_emb = self.col_embed(i)
-            # print(f"Column embedding shape: {x_emb.shape}")
         except Exception as e:
             print(f"Error in col_embed lookup: {e}")
             raise
-        
         try:
             y_emb = self.row_embed(j)
-            # print(f"Row embedding shape: {y_emb.shape}")
         except Exception as e:
             print(f"Error in row_embed lookup: {e}")
             raise
@@ -180,7 +170,7 @@ def build_position_encoding(hidden_dim, position_embedding):
         position_embedding = PositionEmbeddingSine(N_steps, normalize=True)
     elif position_embedding in ('v3', 'learned'):
         position_embedding = PositionEmbeddingLearned(N_steps)
-        print("position_embedding",position_embedding)
+        # print("position_embedding",position_embedding)
     else:
         raise ValueError(f"not supported {position_embedding}")
 

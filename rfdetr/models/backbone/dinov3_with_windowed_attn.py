@@ -312,6 +312,7 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
             windowed_pixel_tokens = pixel_tokens_with_pos_embed.view(batch_size, num_windows, num_h_patches_per_window, num_windows, num_h_patches_per_window, -1)
             windowed_pixel_tokens = windowed_pixel_tokens.permute(0, 1, 3, 2, 4, 5)
             windowed_pixel_tokens = windowed_pixel_tokens.reshape(batch_size * num_windows ** 2, num_h_patches_per_window * num_w_patches_per_window, -1)
+            # flatten img patch
             windowed_cls_token_with_pos_embed = cls_token_with_pos_embed.repeat(num_windows ** 2, 1, 1)
             embeddings = torch.cat((windowed_cls_token_with_pos_embed, windowed_pixel_tokens), dim=1)
 
@@ -319,7 +320,7 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
         embeddings = torch.cat(
             (embeddings[:, :1], self.register_tokens.expand(embeddings.shape[0], -1, -1), embeddings[:, 1:]), dim=1
         ) if self.config.num_register_tokens > 0 else embeddings
-
+        # B,cls+reg+patch
         embeddings = self.dropout(embeddings)
 
         return embeddings,num_h_patches,num_w_patches,num_w_patches_per_window,num_w_patches_per_window
@@ -527,7 +528,7 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
         attn_class: Callable[..., nn.Module] = config.attn_class if hasattr(config, 'attn_class') else SelfAttention
         ffn_layer: Callable[..., nn.Module] = config.ffn_layer if hasattr(config, 'ffn_layer') else Mlp
         act_layer: Callable[..., nn.Module] = config.act_layer if hasattr(config, 'act_layer') else nn.GELU
-
+        self.num_register_tokens=config.num_register_tokens
         self.norm1 = norm_layer(config.hidden_size, eps=config.layer_norm_eps) # d
         self.attn = attn_class(
             config.hidden_size, 
@@ -568,9 +569,21 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
         shortcut = hidden_states
         if run_full_attention:
             # reshape x to remove windows
-            B, HW, C = hidden_states.shape
-            num_windows_squared = self.num_windows ** 2
-            hidden_states = hidden_states.view(B // num_windows_squared, num_windows_squared * HW, C)
+            B, HW, C = hidden_states.shape # HW: cls+reg+patch
+            cls_per_window = 1
+            reg_per_window = self.num_register_tokens
+            patch_per_window = HW - cls_per_window - reg_per_window
+            num_windows_squared = self.num_windows ** 2 # 4
+            B_new = B // num_windows_squared
+            hidden_states = hidden_states.view(B_new, num_windows_squared , HW, C)
+            all_cls = windows[:, :, 0:cls_per_window, :]
+            all_reg = windows[:, :, cls_per_window:cls_per_window + reg_per_window, :]
+            all_patch = windows[:, :, cls_per_window + reg_per_window:, :]
+            flattened_cls = all_cls.reshape(B_new, num_windows_squared * cls_per_window, C)
+            flattened_reg = all_reg.reshape(B_new, num_windows_squared * reg_per_window, C)
+            flattened_patch = all_patch.reshape(B_new, num_windows_squared * patch_per_window, C)
+            hidden_states = torch.cat([flattened_cls, flattened_reg, flattened_patch], dim=1)
+
             if rope_embed is not None:
                 rope_sincos = rope_embed(H=orig_h, W=orig_w)
         else:
@@ -587,8 +600,23 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             # reshape x to add windows back
             B, HW, C = hidden_states.shape
             num_windows_squared = self.num_windows ** 2
-            # hidden_states = hidden_states.view(B * num_windows_squared, HW // num_windows_squared, C)
-            attention_output = attention_output.view(B * num_windows_squared, HW // num_windows_squared, C)
+            cls_per_window = 1
+            reg_per_window = self.num_register_tokens
+            window_seq_length = (HW // num_windows_squared) 
+            patch_per_window = window_seq_length - cls_per_window - reg_per_window 
+            total_cls = num_windows_squared * cls_per_window  
+            total_reg = num_windows_squared * reg_per_window  
+
+            all_cls = hidden_states[:, :total_cls, :].reshape(B, num_windows_squared, cls_per_window, C)
+            all_reg = hidden_states[:, total_cls:total_cls+total_reg, :].reshape(B, num_windows_squared, reg_per_window, C)
+            all_patch = hidden_states[:, total_cls+total_reg:, :].reshape(B, num_windows_squared, patch_per_window, C)
+            
+            windows = torch.cat([all_cls, all_reg, all_patch], dim=2)
+            
+            hidden_states = windows.reshape(B * num_windows_squared, window_seq_length, C)
+            
+            attention_output = attention_output.reshape(B, num_windows_squared, window_seq_length, C)
+            attention_output = attention_output.reshape(B * num_windows_squared, window_seq_length, C)
 
         attention_output = self.ls1(attention_output)
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights

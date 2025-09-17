@@ -253,11 +253,16 @@ def coco_extended_metrics(coco_eval):
             "recall"     : class_recall,
             "f1"         : class_f1,
         })
+        all_precisions.append(class_precision)
+        all_recalls.append(class_recall)
     
     if all_precisions:
         macro_precision = float(np.mean(all_precisions))
-        macro_recall = float(np.mean(all_recalls))  # 所有类别的召回率平均值
-        macro_f1 = float(np.mean(all_f1s))
+        macro_recall = float(np.mean(all_recalls))
+        if macro_precision + macro_recall > 0:  
+            macro_f1 = 2 * (macro_precision * macro_recall) / (macro_precision + macro_recall)
+        else:
+            macro_f1 = float("nan")
     else:
         macro_precision = float("nan")
         macro_recall = float("nan")

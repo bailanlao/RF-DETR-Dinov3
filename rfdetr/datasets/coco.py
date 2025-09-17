@@ -190,7 +190,7 @@ def make_coco_transforms_square_div_64(image_set, resolution, multi_scale=False,
     raise ValueError(f'unknown {image_set}')
 
 def build(image_set, args, resolution):
-    root = Path(args.coco_path)
+    root = Path(args.dataset_dir)
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
     PATHS = {

@@ -127,18 +127,39 @@ class Model:
             # we may want to resume training with a smaller number of groups for group detr
             num_desired_queries = args.num_queries * args.group_detr
             query_param_names = ["refpoint_embed.weight", "query_feat.weight"]
+
             for name, state in checkpoint['model'].items():
                 if any(name.endswith(x) for x in query_param_names):
                     checkpoint['model'][name] = state[:num_desired_queries]
 
-            self.model.load_state_dict(checkpoint['model'], strict=False)
+            model_state = self.model.state_dict()
+            pretrained_state = checkpoint['model']
+            filtered = {}
+            mismatched = []
+
+            for name, param in model_state.items():
+                if name in pretrained_state and pretrained_state[name].shape == param.shape:
+                    filtered[name] = pretrained_state[name]
+                else:
+                    mismatched.append(name)
+                    if param.dim() > 1:
+                        torch.nn.init.xavier_uniform_(param)
+                    else:
+                        torch.nn.init.constant_(param, 0)
+
+            if mismatched:
+                print(f"Warning: {len(mismatched)} mismatched parameters, using random init:")
+                for name in mismatched[:5]:
+                    print(f"  - {name}")
+                if len(mismatched) > 5:
+                    print(f"  ... and {len(mismatched)-5} more")
+
+            self.model.load_state_dict(filtered, strict=False)
         else:
             print("No pretrain weights provided, using default initialization")
-            # 1. 设置默认num_classes为80
             self.args.num_classes = 80
             logger.info(f"Set default num_classes to 80 (no pretrain weights)")
             
-            # 2. 初始化class_names（根据需求设置，这里设为None或默认列表）
             self.class_names = None
         
         if args.backbone_lora:
@@ -180,8 +201,8 @@ class Model:
             self.args.num_classes = args.num_classes
 
         utils.init_distributed_mode(args)
-        print("git:\n  {}\n".format(utils.get_sha()))
-        print(args)
+        # print("git:\n  {}\n".format(utils.get_sha()))
+        # print(args)
         device = torch.device(args.device)
         
         # fix the seed for reproducibility
