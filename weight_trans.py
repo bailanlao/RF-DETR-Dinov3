@@ -1,7 +1,7 @@
 import torch
 from rfdetr.models.backbone.dinov2 import DinoV2
 from rfdetr.models.backbone.dinov3 import DinoV3
-from rfdetr import RFDETRNano, RFDETRBase, RFDETRMedium, RFDETRLarge, RFDETRMediumV3,RFDETRNanoV3
+from rfdetr import RFDETRNano, RFDETRBase, RFDETRMedium, RFDETRLarge, RFDETRMediumV3,RFDETRNanoV3,RFDETRMediumV3Plus
 from torch.nn import Module
 from typing import Dict, Tuple
 
@@ -352,14 +352,14 @@ def transfer_rf_to_dinov3(rf_model, dinov3_model):
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
-    save_path='medium-dinov3.pth'
-    model=RFDETRMediumV3()
+    save_path='medium-dinov3plus.pth'
+    model=RFDETRMediumV3Plus()
     rfdetr = RFDETRMedium(pretrain_weights='D:/__easyHelper__/RF-DETR/rfdetr/checkpoint/medium-coco.pth')
     dinov3=torch.hub.load(
         'D:/__easyHelper__/dinov3-main', 
-        'dinov3_vits16', 
+        'dinov3_vits16plus', 
         source='local', 
-        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16.pth'
+        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16plus.pth'
     )
     rfdetr_core_model=rfdetr.model.model.to(device)
     dinov3_core_model=model.model.model.to(device)

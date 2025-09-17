@@ -61,9 +61,9 @@ if __name__ == "__main__":
     # )
     dinov3sp=torch.hub.load(
         'D:/__easyHelper__/dinov3-main', 
-        'dinov3_vits16plus', 
+        'dinov3_vitl16', 
         source='local', 
-        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16plus.pth'
+        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vitl16.pth'
     )
     print("dinov3smallplus")
     print(dinov3sp)

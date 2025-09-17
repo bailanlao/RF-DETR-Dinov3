@@ -125,14 +125,23 @@ class RFDETR:
         self.model.export(**kwargs)
 
     def train_from_config(self, config: TrainConfig, **kwargs):
-        with open(
-            os.path.join(config.dataset_dir, "train", "_annotations.coco.json"), "r"
-        ) as f:
-            anns = json.load(f)
-            num_classes = len(anns["categories"])
-            class_names = [c["name"] for c in anns["categories"] if c["supercategory"] != "none"]
-            self.model.class_names = class_names
-
+        if config.dataset_file == "roboflow":
+            with open(
+                os.path.join(config.dataset_dir, "train", "_annotations.coco.json"), "r"
+            ) as f:
+                anns = json.load(f)
+                num_classes = len(anns["categories"])
+                class_names = [c["name"] for c in anns["categories"] if c["supercategory"] != "none"]
+                self.model.class_names = class_names
+        elif config.dataset_file == "coco":
+            with open(
+                os.path.join(config.dataset_dir, "annotations", "instances_train2017.json"), "r"
+            ) as f:
+                anns = json.load(f)
+                num_classes = len(anns["categories"])
+                class_names = [c["name"] for c in anns["categories"] if c["supercategory"] != "none"]
+                self.model.class_names = class_names
+        
         if self.model_config.num_classes != num_classes:
             logger.warning(
                 f"num_classes mismatch: model has {self.model_config.num_classes} classes, but your dataset has {num_classes} classes\n"
