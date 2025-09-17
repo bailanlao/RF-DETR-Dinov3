@@ -575,7 +575,7 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             patch_per_window = HW - cls_per_window - reg_per_window
             num_windows_squared = self.num_windows ** 2 # 4
             B_new = B // num_windows_squared
-            hidden_states = hidden_states.view(B_new, num_windows_squared , HW, C)
+            windows = hidden_states.view(B_new, num_windows_squared , HW, C)
             all_cls = windows[:, :, 0:cls_per_window, :]
             all_reg = windows[:, :, cls_per_window:cls_per_window + reg_per_window, :]
             all_patch = windows[:, :, cls_per_window + reg_per_window:, :]
