@@ -153,8 +153,8 @@ class LWDETR(nn.Module):
             assert mask is not None
 
         if self.training:
-            refpoint_embed_weight = self.refpoint_embed.weight
-            query_feat_weight = self.query_feat.weight
+            refpoint_embed_weight = self.refpoint_embed.weight # reference point 
+            query_feat_weight = self.query_feat.weight # init query weight
         else:
             # only use one group in inference
             refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]

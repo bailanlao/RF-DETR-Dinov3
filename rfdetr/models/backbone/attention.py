@@ -69,7 +69,7 @@ class SelfAttention(nn.Module):
         k_dtype = k.dtype
         sin, cos = rope
         rope_dtype = sin.dtype
-        q = q.to(dtype=rope_dtype)
+        q = q.to(dtype=rope_dtype) # B,num_heads,N,head_dim
         k = k.to(dtype=rope_dtype)
         N = q.shape[-2]
         prefix = N - sin.shape[-2]
@@ -85,7 +85,7 @@ class SelfAttention(nn.Module):
         return q, k
 
     def forward(self, x: Tensor, attn_bias=None, rope: Tensor = None, output_attentions=False) -> Tuple[Tensor, Tensor]:
-        qkv = self.qkv(x)
+        qkv = self.qkv(x) # B,N,3C
         attn_v = self.compute_attention(qkv=qkv, attn_bias=attn_bias, rope=rope)
         x = self.proj(attn_v)
         x = self.proj_drop(x)
@@ -110,8 +110,9 @@ class SelfAttention(nn.Module):
         C = self.qkv.in_features
 
         qkv = qkv.reshape(B, N, 3, self.num_heads, C // self.num_heads)
-        q, k, v = torch.unbind(qkv, 2)
-        q, k, v = [t.transpose(1, 2) for t in [q, k, v]]
+        # B,N,3,num_heads,head_dim
+        q, k, v = torch.unbind(qkv, 2) # B,N,num_heads,head_dim
+        q, k, v = [t.transpose(1, 2) for t in [q, k, v]] # B,num_heads,N,head_dim
         if rope is not None:
             q, k = self.apply_rope(q, k, rope)
         x = torch.nn.functional.scaled_dot_product_attention(q, k, v)

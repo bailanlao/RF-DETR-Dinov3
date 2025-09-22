@@ -21,7 +21,7 @@ import torch
 from torch import nn
 
 from rfdetr.util.misc import NestedTensor
-
+from dinov3.layers import RopePositionEmbedding
 
 class PositionEmbeddingSine(nn.Module):
     """
@@ -168,9 +168,11 @@ def build_position_encoding(hidden_dim, position_embedding):
     if position_embedding in ('v2', 'sine'):
         # TODO find a better way of exposing other arguments
         position_embedding = PositionEmbeddingSine(N_steps, normalize=True)
-    elif position_embedding in ('v3', 'learned'):
+    elif position_embedding in ('learned'):
         position_embedding = PositionEmbeddingLearned(N_steps)
         # print("position_embedding",position_embedding)
+    elif position_embedding in ('rope', 'v3'):
+        position_embedding = RopePositionEmbedding(embed_dim=hidden_dim)
     else:
         raise ValueError(f"not supported {position_embedding}")
 

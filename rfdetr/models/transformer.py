@@ -73,10 +73,10 @@ def gen_encoder_output_proposals(memory, memory_padding_mask, spatial_shapes, un
     """
     Input:
         - memory: bs, \sum{hw}, d_model
-        - memory_padding_mask: bs, \sum{hw}
+        - memory_padding_mask: bs, \sum{hw} (False is valid, True is padding)
         - spatial_shapes: nlevel, 2
     Output:
-        - output_memory: bs, \sum{hw}, d_model
+        - output_memory: bs, \sum{hw}, d_model (filtered memory,invalid features are set to 0)
         - output_proposals: bs, \sum{hw}, 4
     """
     N_, S_, C_ = memory.shape
@@ -86,30 +86,32 @@ def gen_encoder_output_proposals(memory, memory_padding_mask, spatial_shapes, un
     for lvl, (H_, W_) in enumerate(spatial_shapes):
         if memory_padding_mask is not None:
             mask_flatten_ = memory_padding_mask[:, _cur:(_cur + H_ * W_)].view(N_, H_, W_, 1)
-            valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1)
-            valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1)
+            valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1) # B (each img valid_H)
+            valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1) # B (each img valid_W)
         else:
-            valid_H = torch.tensor([H_ for _ in range(N_)], device=memory.device)
-            valid_W = torch.tensor([W_ for _ in range(N_)], device=memory.device)
+            valid_H = torch.tensor([H_ for _ in range(N_)], device=memory.device) # B (each img H)
+            valid_W = torch.tensor([W_ for _ in range(N_)], device=memory.device) # B (each img W)
 
         grid_y, grid_x = torch.meshgrid(torch.linspace(0, H_ - 1, H_, dtype=torch.float32, device=memory.device),
                                         torch.linspace(0, W_ - 1, W_, dtype=torch.float32, device=memory.device))
         grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1) # H_, W_, 2
 
         scale = torch.cat([valid_W.unsqueeze(-1), valid_H.unsqueeze(-1)], 1).view(N_, 1, 1, 2)
-        grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale
+        grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) / scale # center normalize each grid index
 
-        wh = torch.ones_like(grid) * 0.05 * (2.0 ** lvl)
+        wh = torch.ones_like(grid) * 0.05 * (2.0 ** lvl) # init wh each lv -> 0.05, 0.05*2, 0.05*4
 
-        proposal = torch.cat((grid, wh), -1).view(N_, -1, 4)
+        proposal = torch.cat((grid, wh), -1).view(N_, -1, 4) # init proposal x,y,w,h as center of each grid and flatten
         proposals.append(proposal)
         _cur += (H_ * W_)
-
-    output_proposals = torch.cat(proposals, 1)
+    # append and filter invalid proposals
+    output_proposals = torch.cat(proposals, 1) # -> bs, \sum{hw}, 4
+    # filter x/y/w/h out of range [0, 1] -> bs, \sum{HW}, 1 (bool)
     output_proposals_valid = ((output_proposals > 0.01) & (output_proposals < 0.99)).all(-1, keepdim=True)
 
     if unsigmoid:
-        output_proposals = torch.log(output_proposals / (1 - output_proposals)) # unsigmoid
+        output_proposals = torch.log(output_proposals / (1 - output_proposals)) # unsigmoid to logits
+        # invalid -> inf (to be filtered out in decoder)
         if memory_padding_mask is not None:
             output_proposals = output_proposals.masked_fill(memory_padding_mask.unsqueeze(-1), float('inf'))
         output_proposals = output_proposals.masked_fill(~output_proposals_valid, float('inf'))
@@ -119,6 +121,7 @@ def gen_encoder_output_proposals(memory, memory_padding_mask, spatial_shapes, un
         output_proposals = output_proposals.masked_fill(~output_proposals_valid, float(0))
 
     output_memory = memory
+    # fill invalid memory with 0
     if memory_padding_mask is not None:
         output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), float(0))
     output_memory = output_memory.masked_fill(~output_proposals_valid, float(0))
@@ -217,14 +220,15 @@ class Transformer(nn.Module):
         memory = torch.cat(src_flatten, 1)    # bs, \sum{hxw}, c 
         if masks is not None:
             mask_flatten = torch.cat(mask_flatten, 1)   # bs, \sum{hxw}
-            valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
+            valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1) # each img valid ratio (bs, 2) w and h
         
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c 
-        spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=memory.device)
+        spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=memory.device) # each level shape (bs, 2) h and w
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
-        # get the index of flatten tensor
+        # get the index of flatten tensor 0, lv1, lv2...
         
-        if self.two_stage:
+        if self.two_stage: # select high level proposal
+            # get init proposals, each x,y is center of grid, wh is scaled by lv, invalid feature token is set to 0
             output_memory, output_proposals = gen_encoder_output_proposals(
                 memory, mask_flatten, spatial_shapes, unsigmoid=not self.bbox_reparam
             )
@@ -232,23 +236,28 @@ class Transformer(nn.Module):
             refpoint_embed_ts, memory_ts, boxes_ts = [], [], []
             group_detr = self.group_detr if self.training else 1
             for g_idx in range(group_detr):
+                # enc_output_norm: layernorm, enc_output: linear(d_model,d_model)
                 output_memory_gidx = self.enc_output_norm[g_idx](self.enc_output[g_idx](output_memory))
-    
+                # self.enc_out_class_embed deepcopy from lwdetr, classify head (d_model, num_classes)
+                # out: (bs, \sum{hw}, num_classes) background + foreground
                 enc_outputs_class_unselected_gidx = self.enc_out_class_embed[g_idx](output_memory_gidx)
-                if self.bbox_reparam:
+                if self.bbox_reparam: # use valid tokens to generate delta to reparam proposal
+                    # self.enc_out_bbox_embed: linear(d_model, 4) deepcopy from lwdetr
                     enc_outputs_coord_delta_gidx = self.enc_out_bbox_embed[g_idx](output_memory_gidx)
                     enc_outputs_coord_cxcy_gidx = enc_outputs_coord_delta_gidx[...,
                         :2] * output_proposals[..., 2:] + output_proposals[..., :2]
+                    # exp: make sure delta (0, +inf) to multi wh
                     enc_outputs_coord_wh_gidx = enc_outputs_coord_delta_gidx[..., 2:].exp() * output_proposals[..., 2:]
                     enc_outputs_coord_unselected_gidx = torch.concat(
                         [enc_outputs_coord_cxcy_gidx, enc_outputs_coord_wh_gidx], dim=-1)
                 else:
                     enc_outputs_coord_unselected_gidx = self.enc_out_bbox_embed[g_idx](
                         output_memory_gidx) + output_proposals # (bs, \sum{hw}, 4) unsigmoid
-
-                topk = min(self.num_queries, enc_outputs_class_unselected_gidx.shape[-2])
+                # enc_outputs_class_unselected_gidx: (bs, \sum{hw}, num_classes)
+                topk = min(self.num_queries, enc_outputs_class_unselected_gidx.shape[-2]) # min queries and anchor num
+                # select topk proposals index by max class score 
                 topk_proposals_gidx = torch.topk(enc_outputs_class_unselected_gidx.max(-1)[0], topk, dim=1)[1] # bs, nq
-                
+                # refpoint_embed_gidx_undetach：(bs, nq, 4) topk proposals coord
                 refpoint_embed_gidx_undetach = torch.gather(
                     enc_outputs_coord_unselected_gidx, 1, topk_proposals_gidx.unsqueeze(-1).repeat(1, 1, 4)) # unsigmoid
                 # for decoder layer, detached as initial ones, (bs, nq, 4)
@@ -266,14 +275,15 @@ class Transformer(nn.Module):
             # (bs, nq, d)
             memory_ts = torch.cat(memory_ts, dim=1)#.transpose(0, 1)
             boxes_ts = torch.cat(boxes_ts, dim=1)#.transpose(0, 1)
-        
+        # memory_ts is img patch tokens for topk anchor
+        # boxes_ts and refpoint_embed_ts are anchor boxes and refpoints for anchor
         if self.dec_layers > 0:
-            tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1)
-            refpoint_embed = refpoint_embed.unsqueeze(0).repeat(bs, 1, 1)
+            tgt = query_feat.unsqueeze(0).repeat(bs, 1, 1) # bs, num_queries, d
+            refpoint_embed = refpoint_embed.unsqueeze(0).repeat(bs, 1, 1) # bs, num_queries, 4
             if self.two_stage:
-                ts_len = refpoint_embed_ts.shape[-2]
-                refpoint_embed_ts_subset = refpoint_embed[..., :ts_len, :]
-                refpoint_embed_subset = refpoint_embed[..., ts_len:, :]
+                ts_len = refpoint_embed_ts.shape[-2] # num proposals for first stage
+                refpoint_embed_ts_subset = refpoint_embed[..., :ts_len, :] # two stage part
+                refpoint_embed_subset = refpoint_embed[..., ts_len:, :] # regular part
 
                 if self.bbox_reparam:
                     refpoint_embed_cxcy = refpoint_embed_ts_subset[..., :2] * refpoint_embed_ts[..., 2:]
@@ -281,9 +291,9 @@ class Transformer(nn.Module):
                     refpoint_embed_wh = refpoint_embed_ts_subset[..., 2:].exp() * refpoint_embed_ts[..., 2:]
                     refpoint_embed_ts_subset = torch.concat(
                         [refpoint_embed_cxcy, refpoint_embed_wh], dim=-1
-                    )
+                    ) # use linear to reparam xy, use exp to reparam wh
                 else:
-                    refpoint_embed_ts_subset = refpoint_embed_ts_subset + refpoint_embed_ts
+                    refpoint_embed_ts_subset = refpoint_embed_ts_subset + refpoint_embed_ts # regular + proposal
                 
                 refpoint_embed = torch.concat(
                     [refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)

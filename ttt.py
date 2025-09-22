@@ -2,6 +2,9 @@ from rfdetr.models.backbone.dinov2 import DinoV2
 from rfdetr.models.backbone.dinov3 import DinoV3
 from rfdetr import RFDETRNano, RFDETRBase, RFDETRMedium, RFDETRLarge, RFDETRMediumV3, RFDETRNanoV3,RFDETRMediumV3Plus
 import torch
+from rfdetr.util.misc import (NestedTensor, nested_tensor_from_tensor_list,
+                       accuracy, get_world_size,
+                       is_dist_avail_and_initialized)
 
 def print_instance_attributes(obj, indent=0, max_depth=3):
     
@@ -61,20 +64,30 @@ if __name__ == "__main__":
     # )
     dinov3sp=torch.hub.load(
         'D:/__easyHelper__/dinov3-main', 
-        'dinov3_vitl16', 
+        'dinov3_vits16plus', 
         source='local', 
-        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vitl16.pth'
+        weights='D:/__easyHelper__/dinov3-main/checkpoint/dinov3_vits16plus.pth'
     )
     print("dinov3smallplus")
     print(dinov3sp)
-    model=RFDETRMediumV3Plus(position_embedding='learned')
+    model=RFDETRMediumV3Plus(position_embedding='sine')
     dinov3_core_model=model.model.model.to(device)
     dinov3_encoder = dinov3_core_model.backbone[0].encoder
     print(dinov3_encoder)
+    dinov3_backbone=dinov3_core_model.backbone
+    print(dinov3_core_model)
     for param in dinov3_core_model.parameters():
         param.requires_grad = False
     # print(dinov3_encoder)
     x = torch.randn(5, 3, 640, 640).to(device)
     for j in dinov3_encoder(x):
         print(j.shape)
+    feats,poss=dinov3_backbone(nested_tensor_from_tensor_list(x))
+    print("feat shape:")
+    for i in feats:
+        src,mask=i.decompose()
+        print(src.shape)
+    print("pos shape:")
+    for i in poss:
+        print(i.shape)
     dinov3_core_model(x)

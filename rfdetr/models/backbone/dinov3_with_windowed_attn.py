@@ -583,7 +583,8 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             flattened_reg = all_reg.reshape(B_new, num_windows_squared * reg_per_window, C)
             flattened_patch = all_patch.reshape(B_new, num_windows_squared * patch_per_window, C)
             hidden_states = torch.cat([flattened_cls, flattened_reg, flattened_patch], dim=1)
-
+            # (B//num_windows², num_windows²×HW, C)
+            
             if rope_embed is not None:
                 rope_sincos = rope_embed(H=orig_h, W=orig_w)
         else:

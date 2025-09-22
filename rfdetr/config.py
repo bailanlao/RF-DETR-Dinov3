@@ -63,7 +63,7 @@ class RFDETRLargeConfig(RFDETRBaseConfig):
     sa_nheads: int = 12
     ca_nheads: int = 24
     dec_n_points: int = 4
-    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P5"]
+    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P5"] # (P3=2.0, P4=1.0, P5=0.5, P6=0.25)
     pretrain_weights: Optional[str] = "rf-detr-large.pth"
 
 class RFDETRNanoConfig(RFDETRBaseConfig):
@@ -127,8 +127,9 @@ class RFDETRMediumV3PlusConfig(RFDETRBaseConfig):
     dec_layers: int = 4
     patch_size: int = 16
     resolution: int = 576
-    position_embedding: Literal["sine","learned"] = "learned"
+    position_embedding: Literal["sine","learned"] = "sine"
     positional_encoding_size: int = 36
+    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P5"] #(P3=2.0, P4=1.0, P5=0.5, P6=0.25)
     # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3-plus.pth"
     pretrain_weights: Optional[str] = None
 
@@ -173,7 +174,7 @@ class TrainConfig(BaseModel):
     expanded_scales: bool = True
     do_random_resize_via_padding: bool = False
     use_ema: bool = True
-    num_workers: int = 2
+    num_workers: int = 8
     weight_decay: float = 1e-4
     early_stopping: bool = False
     early_stopping_patience: int = 10
