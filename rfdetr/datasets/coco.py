@@ -156,7 +156,7 @@ def make_coco_transforms_square_div_64(image_set, resolution, multi_scale=False,
         if skip_random_resize:
             scales = [scales[-1]]
         print(scales)
-
+    # TODO: add mosaic and change stratigy by epoch
     if image_set == 'train':
         return T.Compose([
             T.RandomHorizontalFlip(),

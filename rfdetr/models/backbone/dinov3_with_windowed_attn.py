@@ -284,46 +284,46 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
         return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
 
     def forward(self, pixel_values: torch.Tensor, bool_masked_pos: Optional[torch.Tensor] = None) -> torch.Tensor:
-        batch_size, _, height, width = pixel_values.shape
+        B, _, H, W = pixel_values.shape
         target_dtype = self.patch_embeddings.projection.weight.dtype
-        embeddings = self.patch_embeddings(pixel_values.to(dtype=target_dtype)) # 只有图像
+        x = self.patch_embeddings(pixel_values.to(dtype=target_dtype))  # [B, N, C], N=H/ps*W/ps
 
         if bool_masked_pos is not None:
-            embeddings = torch.where(
-                bool_masked_pos.unsqueeze(-1), self.mask_token.to(embeddings.dtype).unsqueeze(0), embeddings
-            )
+            x = torch.where(bool_masked_pos.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
 
-        # add the [CLS] token to the embedded patch tokens
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-        embeddings = torch.cat((cls_tokens, embeddings), dim=1)
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)
 
         # embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
+        grid_h = H // self.patch_size
+        grid_w = W // self.patch_size
 
         if self.config.num_windows > 1:
-            # reshape for windows
-            num_h_patches = height // self.config.patch_size
-            num_w_patches = width // self.config.patch_size
-            cls_token_with_pos_embed = embeddings[:, :1]
-            pixel_tokens_with_pos_embed = embeddings[:, 1:]
-            pixel_tokens_with_pos_embed = pixel_tokens_with_pos_embed.view(batch_size, num_h_patches, num_w_patches, -1)
-            num_w_patches_per_window = num_w_patches // self.config.num_windows
-            num_h_patches_per_window = num_h_patches // self.config.num_windows
-            num_windows = self.config.num_windows
-            windowed_pixel_tokens = pixel_tokens_with_pos_embed.view(batch_size, num_windows, num_h_patches_per_window, num_windows, num_h_patches_per_window, -1)
-            windowed_pixel_tokens = windowed_pixel_tokens.permute(0, 1, 3, 2, 4, 5)
-            windowed_pixel_tokens = windowed_pixel_tokens.reshape(batch_size * num_windows ** 2, num_h_patches_per_window * num_w_patches_per_window, -1)
-            # flatten img patch
-            windowed_cls_token_with_pos_embed = cls_token_with_pos_embed.repeat(num_windows ** 2, 1, 1)
-            embeddings = torch.cat((windowed_cls_token_with_pos_embed, windowed_pixel_tokens), dim=1)
+            num_wins = self.config.num_windows
+            win_grid_h = grid_h // num_wins
+            win_grid_w = grid_w // num_wins
+        else:
+            num_wins = 1
+            win_grid_h = grid_h
+            win_grid_w = grid_w
+
+        if num_wins > 1:
+            # 只对像素 tokens 窗口化
+            cls_with_pos = x[:, :1]
+            pix = x[:, 1:]  # [B, grid_h*grid_w, C]
+            pix = pix.view(B, grid_h, grid_w, -1)
+            pix = pix.view(B, num_wins, win_grid_h, num_wins, win_grid_w, -1)
+            pix = pix.permute(0, 1, 3, 2, 4, 5).contiguous()  # [B, nw, nw, win_h, win_w, C]
+            pix = pix.view(B * num_wins * num_wins, win_grid_h * win_grid_w, -1)
+            cls_with_pos = cls_with_pos.repeat(num_wins * num_wins, 1, 1)
+            x = torch.cat([cls_with_pos, pix], dim=1)
 
         # add register tokens
-        embeddings = torch.cat(
-            (embeddings[:, :1], self.register_tokens.expand(embeddings.shape[0], -1, -1), embeddings[:, 1:]), dim=1
-        ) if self.config.num_register_tokens > 0 else embeddings
-        # B,cls+reg+patch
-        embeddings = self.dropout(embeddings)
+        if self.config.num_register_tokens > 0:
+            x = torch.cat([x[:, :1], self.register_tokens.expand(x.size(0), -1, -1), x[:, 1:]], dim=1)
+        x = self.dropout(x)
 
-        return embeddings,num_h_patches,num_w_patches,num_w_patches_per_window,num_w_patches_per_window
+        return x, grid_h, grid_w, win_grid_h, win_grid_w
 
 
 class Dinov3WithRegistersSelfAttention(nn.Module):
@@ -552,6 +552,90 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
         )
         self.ls2 = LayerScale(config.hidden_size)
 
+    # def forward(
+    #     self,
+    #     hidden_states: torch.Tensor,
+    #     head_mask: Optional[torch.Tensor] = None,
+    #     output_attentions: bool = False,
+    #     run_full_attention: bool = False,
+    #     orig_h: int = 0,
+    #     orig_w: int = 0,
+    #     win_h: int = 0,
+    #     win_w: int = 0,
+    #     rope_embed: nn.Module = None,
+    # ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+    #     assert head_mask is None, "head_mask is not supported for windowed attention"
+    #     assert not output_attentions, "output_attentions is not supported for windowed attention"
+    #     shortcut = hidden_states
+    #     if run_full_attention:
+    #         # reshape x to remove windows
+    #         B, HW, C = hidden_states.shape # HW: cls+reg+patch
+    #         cls_per_window = 1
+    #         reg_per_window = self.num_register_tokens
+    #         patch_per_window = HW - cls_per_window - reg_per_window
+    #         num_windows_squared = self.num_windows ** 2 # 4
+    #         B_new = B // num_windows_squared
+    #         windows = hidden_states.view(B_new, num_windows_squared , HW, C)
+    #         all_cls = windows[:, :, 0:cls_per_window, :]
+    #         all_reg = windows[:, :, cls_per_window:cls_per_window + reg_per_window, :]
+    #         all_patch = windows[:, :, cls_per_window + reg_per_window:, :]
+    #         flattened_cls = all_cls.reshape(B_new, num_windows_squared * cls_per_window, C)
+    #         flattened_reg = all_reg.reshape(B_new, num_windows_squared * reg_per_window, C)
+    #         flattened_patch = all_patch.reshape(B_new, num_windows_squared * patch_per_window, C)
+    #         hidden_states = torch.cat([flattened_cls, flattened_reg, flattened_patch], dim=1)
+    #         # (B//num_windows², num_windows²×HW, C)
+            
+    #         if rope_embed is not None:
+    #             rope_sincos = rope_embed(H=orig_h, W=orig_w)
+    #     else:
+    #         rope_sincos = rope_embed(H=win_h, W=win_w)
+        
+    #     self_attention_outputs = self.attn(
+    #         self.norm1(hidden_states),  # in Dinov3WithRegisters, layernorm is applied before self-attention
+    #         rope=rope_sincos,
+    #         output_attentions=output_attentions,
+    #     )
+    #     attention_output = self_attention_outputs[0]
+
+    #     if run_full_attention:
+    #         # reshape x to add windows back
+    #         B, HW, C = hidden_states.shape
+    #         num_windows_squared = self.num_windows ** 2
+    #         cls_per_window = 1
+    #         reg_per_window = self.num_register_tokens
+    #         window_seq_length = (HW // num_windows_squared) 
+    #         patch_per_window = window_seq_length - cls_per_window - reg_per_window 
+    #         total_cls = num_windows_squared * cls_per_window  
+    #         total_reg = num_windows_squared * reg_per_window  
+
+    #         all_cls = hidden_states[:, :total_cls, :].reshape(B, num_windows_squared, cls_per_window, C)
+    #         all_reg = hidden_states[:, total_cls:total_cls+total_reg, :].reshape(B, num_windows_squared, reg_per_window, C)
+    #         all_patch = hidden_states[:, total_cls+total_reg:, :].reshape(B, num_windows_squared, patch_per_window, C)
+            
+    #         windows = torch.cat([all_cls, all_reg, all_patch], dim=2)
+            
+    #         hidden_states = windows.reshape(B * num_windows_squared, window_seq_length, C)
+            
+    #         attention_output = attention_output.reshape(B, num_windows_squared, window_seq_length, C)
+    #         attention_output = attention_output.reshape(B * num_windows_squared, window_seq_length, C)
+
+    #     attention_output = self.ls1(attention_output)
+    #     outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+
+    #     # first residual connection
+    #     hidden_states = attention_output + shortcut
+
+    #     # in Dinov3WithRegisters, layernorm is also applied after self-attention
+    #     layer_output = self.norm2(hidden_states)
+    #     layer_output = self.mlp(layer_output)
+    #     layer_output = self.ls2(layer_output)
+
+    #     # second residual connection
+    #     layer_output = layer_output + hidden_states
+
+    #     outputs = (layer_output,) + outputs
+
+    #     return outputs
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -566,76 +650,81 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         assert head_mask is None, "head_mask is not supported for windowed attention"
         assert not output_attentions, "output_attentions is not supported for windowed attention"
-        shortcut = hidden_states
+
+        Bw, L_or_Lw, C = hidden_states.shape
+        W2 = self.num_windows ** 2
+        R = self.num_register_tokens
+        cls_per_window = 1
+
         if run_full_attention:
-            # reshape x to remove windows
-            B, HW, C = hidden_states.shape # HW: cls+reg+patch
-            cls_per_window = 1
-            reg_per_window = self.num_register_tokens
-            patch_per_window = HW - cls_per_window - reg_per_window
-            num_windows_squared = self.num_windows ** 2 # 4
-            B_new = B // num_windows_squared
-            windows = hidden_states.view(B_new, num_windows_squared , HW, C)
+            B = Bw // W2
+            windows = hidden_states.view(B, W2, L_or_Lw, C)  # (B, W2, 1+R+P, C)
             all_cls = windows[:, :, 0:cls_per_window, :]
-            all_reg = windows[:, :, cls_per_window:cls_per_window + reg_per_window, :]
-            all_patch = windows[:, :, cls_per_window + reg_per_window:, :]
-            flattened_cls = all_cls.reshape(B_new, num_windows_squared * cls_per_window, C)
-            flattened_reg = all_reg.reshape(B_new, num_windows_squared * reg_per_window, C)
-            flattened_patch = all_patch.reshape(B_new, num_windows_squared * patch_per_window, C)
-            hidden_states = torch.cat([flattened_cls, flattened_reg, flattened_patch], dim=1)
-            # (B//num_windows², num_windows²×HW, C)
-            
-            if rope_embed is not None:
-                rope_sincos = rope_embed(H=orig_h, W=orig_w)
+            all_reg = windows[:, :, cls_per_window:cls_per_window + R, :]
+            all_patch = windows[:, :, cls_per_window + R:, :]
+
+            flattened_cls = all_cls.reshape(B, W2 * cls_per_window, C)
+            flattened_reg = all_reg.reshape(B, W2 * R, C)
+            flattened_patch = all_patch.reshape(B, -1, C)  # W2*P
+
+            hidden_states = torch.cat([flattened_cls, flattened_reg, flattened_patch], dim=1)  # (B, W2*(1+R+P), C)
+            rope_sincos = rope_embed(H=orig_h, W=orig_w)
         else:
             rope_sincos = rope_embed(H=win_h, W=win_w)
-        
-        self_attention_outputs = self.attn(
-            self.norm1(hidden_states),  # in Dinov3WithRegisters, layernorm is applied before self-attention
-            rope=rope_sincos,
-            output_attentions=output_attentions,
-        )
-        attention_output = self_attention_outputs[0]
+
+        N = hidden_states.shape[1]
+        if run_full_attention:
+            prefix = W2 * (1 + R)
+            assert N - (orig_h * orig_w) == prefix, f"[full] N={N}, H*W={orig_h * orig_w}, prefix={prefix}"
+        else:
+            prefix = 1 + R
+            assert N - (win_h * win_w) == prefix, f"[win] N={N}, winHW={win_h * win_w}, prefix={prefix}"
+
+        attn_raw = self.attn(self.norm1(hidden_states), rope=rope_sincos)
+        attn_out = attn_raw[0] if isinstance(attn_raw, tuple) else attn_raw
 
         if run_full_attention:
-            # reshape x to add windows back
-            B, HW, C = hidden_states.shape
-            num_windows_squared = self.num_windows ** 2
-            cls_per_window = 1
-            reg_per_window = self.num_register_tokens
-            window_seq_length = (HW // num_windows_squared) 
-            patch_per_window = window_seq_length - cls_per_window - reg_per_window 
-            total_cls = num_windows_squared * cls_per_window  
-            total_reg = num_windows_squared * reg_per_window  
+            B, N_full, C = hidden_states.shape
+            total_cls = W2 * cls_per_window
+            total_reg = W2 * R
+            total_patch = N_full - total_cls - total_reg
+            P_per_win = total_patch // W2
+            Lw = cls_per_window + R + P_per_win
 
-            all_cls = hidden_states[:, :total_cls, :].reshape(B, num_windows_squared, cls_per_window, C)
-            all_reg = hidden_states[:, total_cls:total_cls+total_reg, :].reshape(B, num_windows_squared, reg_per_window, C)
-            all_patch = hidden_states[:, total_cls+total_reg:, :].reshape(B, num_windows_squared, patch_per_window, C)
-            
-            windows = torch.cat([all_cls, all_reg, all_patch], dim=2)
-            
-            hidden_states = windows.reshape(B * num_windows_squared, window_seq_length, C)
-            
-            attention_output = attention_output.reshape(B, num_windows_squared, window_seq_length, C)
-            attention_output = attention_output.reshape(B * num_windows_squared, window_seq_length, C)
+            def restore_windows(x):
+                x_cls = x[:, :total_cls, :].reshape(B, W2, cls_per_window, C)
+                x_reg = x[:, total_cls:total_cls + total_reg, :].reshape(B, W2, R, C)
+                x_patch = x[:, total_cls + total_reg:, :].reshape(B, W2, P_per_win, C)
+                win_seq = torch.cat([x_cls, x_reg, x_patch], dim=2)  # (B, W2, Lw, C)
+                return win_seq.reshape(B * W2, Lw, C)  # (B*W2, Lw, C)
 
-        attention_output = self.ls1(attention_output)
-        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+            hidden_states = restore_windows(hidden_states)
+            attn_out = restore_windows(attn_out)
 
-        # first residual connection
-        hidden_states = attention_output + shortcut
+        gamma1 = self.ls1.gamma
+        if gamma1.dtype != attn_out.dtype:
+            gamma1 = gamma1.to(attn_out.dtype)
+        gamma1 = gamma1.to(attn_out.device)
+        assert gamma1.dim() == 1 and gamma1.numel() == attn_out.shape[-1], \
+            f"LayerScale1 gamma shape {tuple(gamma1.shape)} != C {attn_out.shape[-1]}"
+        attn_out = attn_out * gamma1
 
-        # in Dinov3WithRegisters, layernorm is also applied after self-attention
-        layer_output = self.norm2(hidden_states)
-        layer_output = self.mlp(layer_output)
-        layer_output = self.ls2(layer_output)
+        hidden_states = attn_out + hidden_states
 
-        # second residual connection
-        layer_output = layer_output + hidden_states
+        x = self.norm2(hidden_states)
+        x = self.mlp(x)
 
-        outputs = (layer_output,) + outputs
+        gamma2 = self.ls2.gamma
+        if gamma2.dtype != x.dtype:
+            gamma2 = gamma2.to(x.dtype)
+        gamma2 = gamma2.to(x.device)
+        assert gamma2.dim() == 1 and gamma2.numel() == x.shape[-1], \
+            f"LayerScale2 gamma shape {tuple(gamma2.shape)} != C {x.shape[-1]}"
+        x = x * gamma2
 
-        return outputs
+        x = x + hidden_states
+
+        return (x,)
 
 
 class WindowedDinov3WithRegistersEncoder(nn.Module):
@@ -1103,24 +1192,34 @@ class WindowedDinov3WithRegistersBackbone(WindowedDinov3WithRegistersPreTrainedM
                     hidden_state = hidden_state[:, self.num_register_tokens + 1 :]
                     # this was actually a bug in the original implementation that we copied here,
                     # cause normally the order is height, width
-                    batch_size, _, height, width = pixel_values.shape
-                    patch_size = self.config.patch_size
-
-                    num_h_patches = height // patch_size
-                    num_w_patches = width // patch_size
                     
-                    if self.config.num_windows > 1:
-                        # undo windowing
-                        num_windows_squared = self.config.num_windows ** 2
-                        B, HW, C = hidden_state.shape
-                        num_h_patches_per_window = num_h_patches // self.config.num_windows
-                        num_w_patches_per_window = num_w_patches // self.config.num_windows
-                        hidden_state = hidden_state.reshape(B // num_windows_squared, num_windows_squared * HW, C)
-                        hidden_state = hidden_state.view(B // num_windows_squared, self.config.num_windows, self.config.num_windows, num_h_patches_per_window, num_w_patches_per_window, C)
-                        hidden_state = hidden_state.permute(0, 1, 3, 2, 4, 5)
+                    B_img, _, H_img, W_img = pixel_values.shape
+                    ps = self.config.patch_size
+                    H_grid = H_img // ps
+                    W_grid = W_img // ps
 
-                    hidden_state = hidden_state.reshape(batch_size, num_h_patches, num_w_patches, -1)
-                    hidden_state = hidden_state.permute(0, 3, 1, 2).contiguous()
+                    if self.config.num_windows > 1:
+                        Wn = self.config.num_windows
+                        W2 = Wn * Wn
+                        h_win = H_grid // Wn
+                        w_win = W_grid // Wn
+
+                        # (B*W2, h_win*w_win, C) → (B, Wn, Wn, h_win, w_win, C)
+                        B_all = hidden_state.shape[0]
+                        assert B_all % W2 == 0, "batch 与窗口数不整除"
+                        B = B_all // W2
+                        C = hidden_state.shape[-1]
+                        x = hidden_state.view(B, Wn, Wn, h_win, w_win, C)
+                        # → (B, H_grid, W_grid, C)
+                        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H_grid, W_grid, C)
+                    else:
+                        # (B, H_grid*W_grid, C) → (B, H_grid, W_grid, C)
+                        B = hidden_state.shape[0]
+                        C = hidden_state.shape[-1]
+                        x = hidden_state.view(B, H_grid, W_grid, C)
+
+                    # → (B, C, H_grid, W_grid)
+                    hidden_state = x.permute(0, 3, 1, 2).contiguous()
                 
                 feature_maps += (hidden_state,)
 

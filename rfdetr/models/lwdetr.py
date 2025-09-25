@@ -30,7 +30,7 @@ from rfdetr.util import box_ops
 from rfdetr.util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size,
                        is_dist_avail_and_initialized)
-
+from rfdetr.util.box_ops import (box_iou,box_cxcywh_to_xyxy)
 from rfdetr.models.backbone import build_backbone
 from rfdetr.models.matcher import build_matcher
 from rfdetr.models.transformer import build_transformer
@@ -82,7 +82,6 @@ class LWDETR(nn.Module):
             self.transformer.decoder.bbox_embed = None
 
         self.bbox_reparam = bbox_reparam
-
         # init prior_prob setting for focal loss
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
@@ -285,6 +284,8 @@ class SetCriterion(nn.Module):
         self.use_varifocal_loss = use_varifocal_loss
         self.use_position_supervised_loss = use_position_supervised_loss
         self.ia_bce_loss = ia_bce_loss
+        self.mal_alpha=None
+        self.gamma=2.0
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
@@ -393,6 +394,57 @@ class SetCriterion(nn.Module):
         losses = {'cardinality_error': card_err}
         return losses
 
+    
+    def loss_labels_mal(self, outputs, targets, indices, num_boxes, values=None):
+        assert 'pred_boxes' in outputs
+        def _get_src_permutation_idx(indices):
+            batch_idx = []
+            src_idx = []
+            for batch_id, (s_idx, _) in enumerate(indices):
+                batch_idx.append(torch.full_like(s_idx, fill_value=batch_id, device=s_idx.device))
+                src_idx.append(s_idx)
+            return torch.cat(batch_idx), torch.cat(src_idx)
+        idx = _get_src_permutation_idx(indices)
+        total_matches = sum(len(s_idx) for s_idx, _ in indices)
+        assert len(idx[0]) == total_matches and len(idx[1]) == total_matches, \
+            f"Invalid indices: idx length {len(idx[0])} != total matches {total_matches}"
+
+        batch_idx, src_idx = idx
+        src_logits = outputs['pred_logits']
+        B, Q, C = src_logits.shape
+        if values is None:
+            src_boxes = outputs['pred_boxes'][idx]
+            target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+            ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes))
+            ious = torch.diag(ious).detach()
+        else:
+            ious = values
+
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        target_classes = torch.full(
+            src_logits.shape[:2],
+            self.num_classes - 1,
+            dtype=torch.int64,
+            device=src_logits.device
+        )
+        target_classes[idx] = target_classes_o
+        target = F.one_hot(target_classes, num_classes=self.num_classes)[..., :-1]
+
+        target_score_o = torch.zeros_like(target_classes, dtype=src_logits.dtype)
+        target_score_o[idx] = ious.to(target_score_o.dtype)
+        target_score = target_score_o.unsqueeze(-1) * target
+
+        pred_score = F.sigmoid(src_logits).detach()
+        target_score = target_score.pow(self.gamma)
+        if self.mal_alpha is not None:
+            weight = self.mal_alpha * pred_score.pow(self.gamma) * (1 - target) + target
+        else:
+            weight = pred_score.pow(self.gamma) * (1 - target) + target
+
+        loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
+        loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
+        return {'loss_mal': loss}
+
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
@@ -431,6 +483,7 @@ class SetCriterion(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
+            'mal': self.loss_labels_mal,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -658,6 +711,7 @@ def build_criterion_and_postprocessors(args):
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
+    weight_dict['loss_mal'] = args.mal_loss_coef
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
@@ -667,7 +721,7 @@ def build_criterion_and_postprocessors(args):
             aux_weight_dict.update({k + f'_enc': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
-    losses = ['labels', 'boxes', 'cardinality']
+    losses = ['labels', 'boxes', 'cardinality', 'mal']
 
     try:
         sum_group_losses = args.sum_group_losses

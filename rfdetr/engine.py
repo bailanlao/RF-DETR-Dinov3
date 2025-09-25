@@ -69,7 +69,7 @@ def train_one_epoch(
         "class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}")
     )
     header = "Epoch: [{}]".format(epoch)
-    print_freq = 10
+    print_freq = 30
     start_steps = epoch * num_training_steps_per_epoch
 
     print("Grad accum steps: ", args.grad_accum_steps)

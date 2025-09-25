@@ -12,7 +12,7 @@
     "mask_k_bias": true,
     "ffn_bias": true,
     "proj_bias": true,
-    "layer_norm_eps": 1e-06,
+    "layer_norm_eps": 1e-05,
     "layerscale_value": 1.0,
     "mlp_ratio": 4,
     "model_type": "dinov2",

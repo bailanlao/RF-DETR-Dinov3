@@ -508,15 +508,15 @@ def initialize_dinov3_weights(model):
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
-    plus = "plus"
-    save_path = f'medium-dinov3{plus}.pth'
+    plus = ""
+    save_path = f'medium-dinov3{plus}-randomdecoder.pth'
     
     # 加载模型
     if plus == "plus":
         model = RFDETRMediumV3Plus()
     else:
         model = RFDETRMediumV3()
-    
+
     # rfdetr = RFDETRMedium(pretrain_weights='D:/__easyHelper__/RF-DETR/rfdetr/checkpoint/medium-coco.pth')
     dinov3 = torch.hub.load(
         'D:/__easyHelper__/dinov3-main', 

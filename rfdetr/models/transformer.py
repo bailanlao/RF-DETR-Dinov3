@@ -294,7 +294,7 @@ class Transformer(nn.Module):
                     ) # use linear to reparam xy, use exp to reparam wh
                 else:
                     refpoint_embed_ts_subset = refpoint_embed_ts_subset + refpoint_embed_ts # regular + proposal
-                
+                # two stage part use generate ref point to refine
                 refpoint_embed = torch.concat(
                     [refpoint_embed_ts_subset, refpoint_embed_subset], dim=-2)
 
@@ -353,26 +353,28 @@ class TransformerDecoder(nn.Module):
             new_refpoints_unsigmoid = refpoints_unsigmoid + new_refpoints_delta
         return new_refpoints_unsigmoid
 
-    def forward(self, tgt, memory,
-                tgt_mask: Optional[Tensor] = None,
+    def forward(self, 
+                tgt, # queries
+                memory, # img features
+                tgt_mask: Optional[Tensor] = None, # mask
                 memory_mask: Optional[Tensor] = None,
                 tgt_key_padding_mask: Optional[Tensor] = None,
-                memory_key_padding_mask: Optional[Tensor] = None,
-                pos: Optional[Tensor] = None,
-                refpoints_unsigmoid: Optional[Tensor] = None,
+                memory_key_padding_mask: Optional[Tensor] = None, # padding mask
+                pos: Optional[Tensor] = None, # position
+                refpoints_unsigmoid: Optional[Tensor] = None, # unsigmoid refpoints cxcywh
                 # for memory
                 level_start_index: Optional[Tensor] = None, # num_levels
                 spatial_shapes: Optional[Tensor] = None, # bs, num_levels, 2
                 valid_ratios: Optional[Tensor] = None):
-        output = tgt
+        output = tgt 
 
         intermediate = []
-        hs_refpoints_unsigmoid = [refpoints_unsigmoid]
+        hs_refpoints_unsigmoid = [refpoints_unsigmoid] # store refpoints for each layer
         
         def get_reference(refpoints):
-            # [num_queries, batch_size, 4]
+            # [batch_size, num_queries, 4]
             obj_center = refpoints[..., :4]
-            
+            # TODO: 这里使用的是sine的位置编码
             if self._export:
                 query_sine_embed = gen_sineembed_for_position(obj_center, self.d_model / 2) # bs, nq, 256*2 
                 refpoints_input = obj_center[:, :, None] # bs, nq, 1, 4
@@ -385,7 +387,7 @@ class TransformerDecoder(nn.Module):
             return obj_center, refpoints_input, query_pos, query_sine_embed
         
         # always use init refpoints
-        if self.lite_refpoint_refine:
+        if self.lite_refpoint_refine: # only use init refpoints reduce cul
             if self.bbox_reparam:
                 obj_center, refpoints_input, query_pos, query_sine_embed = get_reference(refpoints_unsigmoid)
             else:
@@ -421,6 +423,7 @@ class TransformerDecoder(nn.Module):
                 if layer_id != self.num_layers - 1:
                     hs_refpoints_unsigmoid.append(new_refpoints_unsigmoid)
                 refpoints_unsigmoid = new_refpoints_unsigmoid.detach()
+                # update ref points
 
             if self.return_intermediate:
                 intermediate.append(self.norm(output))

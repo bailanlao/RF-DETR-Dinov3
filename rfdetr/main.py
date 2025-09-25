@@ -940,6 +940,8 @@ def populate_args(
     cls_loss_coef=2,
     bbox_loss_coef=5,
     giou_loss_coef=2,
+    mal_loss_coef=2,
+
     focal_alpha=0.25,
     aux_loss=True,
     sum_group_losses=False,
@@ -1051,6 +1053,7 @@ def populate_args(
         cls_loss_coef=cls_loss_coef,
         bbox_loss_coef=bbox_loss_coef,
         giou_loss_coef=giou_loss_coef,
+        mal_loss_coef=mal_loss_coef,
         focal_alpha=focal_alpha,
         aux_loss=aux_loss,
         sum_group_losses=sum_group_losses,
