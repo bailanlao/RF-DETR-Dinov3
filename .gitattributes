@@ -1,2 +1,0 @@
-medium-dinov2 filter=lfs diff=lfs merge=lfs -text
-medium-dinov2-randomdecoder filter=lfs diff=lfs merge=lfs -text
