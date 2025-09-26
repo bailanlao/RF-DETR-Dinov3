@@ -356,7 +356,7 @@ class TransformerDecoder(nn.Module):
     def forward(self, 
                 tgt, # queries
                 memory, # img features
-                tgt_mask: Optional[Tensor] = None, # mask
+                tgt_mask: Optional[Tensor] = None, # None
                 memory_mask: Optional[Tensor] = None,
                 tgt_key_padding_mask: Optional[Tensor] = None,
                 memory_key_padding_mask: Optional[Tensor] = None, # padding mask
@@ -515,16 +515,17 @@ class TransformerDecoderLayer(nn.Module):
         q = k = tgt + query_pos
         v = tgt
         if self.training:
+            # (bs, 300*13, 256)->[(bs, 300, 256), ...]->(bs*13, 300, 256)
             q = torch.cat(q.split(num_queries // self.group_detr, dim=1), dim=0)
             k = torch.cat(k.split(num_queries // self.group_detr, dim=1), dim=0)
             v = torch.cat(v.split(num_queries // self.group_detr, dim=1), dim=0)
 
-        tgt2 = self.self_attn(q, k, v, attn_mask=tgt_mask,
+        tgt2 = self.self_attn(q, k, v, attn_mask=tgt_mask, # None
                             key_padding_mask=tgt_key_padding_mask,
-                            need_weights=False)[0]
+                            need_weights=False)[0] # between group queries
         
         if self.training:
-            tgt2 = torch.cat(tgt2.split(bs, dim=0), dim=1)
+            tgt2 = torch.cat(tgt2.split(bs, dim=0), dim=1) # (bs, 300*13, 256)
         # ========== End of Self-Attention =============
 
         tgt = tgt + self.dropout1(tgt2)
@@ -532,8 +533,8 @@ class TransformerDecoderLayer(nn.Module):
 
         # ========== Begin of Cross-Attention =============
         tgt2 = self.cross_attn(
-            self.with_pos_embed(tgt, query_pos),
-            reference_points,
+            self.with_pos_embed(tgt, query_pos), # queries
+            reference_points, # ref points
             memory,
             spatial_shapes,
             level_start_index,

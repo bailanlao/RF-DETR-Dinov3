@@ -68,6 +68,8 @@ class SelfAttention(nn.Module):
         q_dtype = q.dtype
         k_dtype = k.dtype
         sin, cos = rope
+        sin = sin.unsqueeze(1)  # [bs, 1, HW, D]
+        cos = cos.unsqueeze(1)  # [bs, 1, HW, D]
         rope_dtype = sin.dtype
         q = q.to(dtype=rope_dtype) # B,num_heads,N,head_dim
         k = k.to(dtype=rope_dtype)
@@ -83,6 +85,7 @@ class SelfAttention(nn.Module):
         q = q.to(dtype=q_dtype)
         k = k.to(dtype=k_dtype)
         return q, k
+    
 
     def forward(self, x: Tensor, attn_bias=None, rope: Tensor = None, output_attentions=False) -> Tuple[Tensor, Tensor]:
         qkv = self.qkv(x) # B,N,3C
