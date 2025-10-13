@@ -683,6 +683,7 @@ def build_model(args):
         patch_size=args.patch_size,
         num_windows=args.num_windows,
         positional_encoding_size=args.positional_encoding_size,
+        select_mode=args.select_mode,
         device=device
     )
     if args.encoder_only:

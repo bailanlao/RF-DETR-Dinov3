@@ -15,7 +15,7 @@ class ModelConfig(BaseModel):
     out_feature_indexes: List[int]
     dec_layers: int
     two_stage: bool = True
-    projector_scale: List[Literal["P3", "P4", "P5"]]
+    projector_scale: List[Literal["P3", "P4", "P5","P6"]]
     hidden_dim: int
     patch_size: int
     num_windows: int
@@ -33,6 +33,7 @@ class ModelConfig(BaseModel):
     group_detr: int = 13
     gradient_checkpointing: bool = False
     positional_encoding_size: int
+    decoder_sa_type: Literal["normal", "diff"] = "normal"
 
 class RFDETRBaseConfig(ModelConfig):
     """
@@ -48,7 +49,7 @@ class RFDETRBaseConfig(ModelConfig):
     dec_n_points: int = 2
     num_queries: int = 300
     num_select: int = 300
-    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P4"]
+    projector_scale: List[Literal["P3", "P4", "P5","P6"]] = ["P4"]
     out_feature_indexes: List[int] = [2, 5, 8, 11]
     pretrain_weights: Optional[str] = "rf-detr-base.pth"
     resolution: int = 560
@@ -63,8 +64,9 @@ class RFDETRLargeConfig(RFDETRBaseConfig):
     sa_nheads: int = 12
     ca_nheads: int = 24
     dec_n_points: int = 4
-    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P5"] # (P3=2.0, P4=1.0, P5=0.5, P6=0.25)
-    pretrain_weights: Optional[str] = "rf-detr-large.pth"
+    projector_scale: List[Literal["P3", "P4", "P5","P6"]] = ["P3", "P5","P6"] # (P3=2.0, P4=1.0, P5=0.5, P6=0.25)
+    # pretrain_weights: Optional[str] = "rf-detr-large.pth"
+    pretrain_weights: Optional[str] = None
 
 class RFDETRNanoConfig(RFDETRBaseConfig):
     """
@@ -114,6 +116,8 @@ class RFDETRMediumV3Config(RFDETRBaseConfig):
     patch_size: int = 16
     resolution: int = 576
     positional_encoding_size: int = 36
+    select_mode: int = 2
+    projector_scale: List[Literal["P3", "P4", "P5","P6"]] = ["P4","P5","P6"]
     # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3.pth"
     pretrain_weights: Optional[str] = None
 
@@ -129,8 +133,9 @@ class RFDETRMediumV3PlusConfig(RFDETRBaseConfig):
     resolution: int = 576
     position_embedding: Literal["sine","learned"] = "sine"
     positional_encoding_size: int = 36
-    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P5"] #(P3=2.0, P4=1.0, P5=0.5, P6=0.25)
+    # projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P5"] #(P3=2.0, P4=1.0, P5=0.5, P6=0.25)
     # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3-plus.pth"
+    decoder_sa_type: Literal["normal", "diff"] = "diff"
     pretrain_weights: Optional[str] = None
 
 class RFDETRNanoV3Config(RFDETRBaseConfig):

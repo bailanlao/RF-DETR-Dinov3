@@ -82,8 +82,8 @@ def train_one_epoch(
         scaler = GradScaler('cuda', enabled=args.amp)
 
     optimizer.zero_grad()
-    assert batch_size % args.grad_accum_steps == 0
-    sub_batch_size = batch_size // args.grad_accum_steps
+    # assert batch_size % args.grad_accum_steps == 0
+    # sub_batch_size = batch_size // args.grad_accum_steps
     print("LENGTH OF DATA LOADER:", len(data_loader))
     for data_iter_step, (samples, targets) in enumerate(
         metric_logger.log_every(data_loader, print_freq, header)
@@ -116,54 +116,49 @@ def train_one_epoch(
             with torch.inference_mode():
                 samples.tensors = F.interpolate(samples.tensors, size=scale, mode='bilinear', align_corners=False)
                 samples.mask = F.interpolate(samples.mask.unsqueeze(1).float(), size=scale, mode='nearest').squeeze(1).bool()
+        samples = samples.to(device)
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        for i in range(args.grad_accum_steps):
-            start_idx = i * sub_batch_size
-            final_idx = start_idx + sub_batch_size
-            new_samples_tensors = samples.tensors[start_idx:final_idx]
-            new_samples = NestedTensor(new_samples_tensors, samples.mask[start_idx:final_idx])
-            new_samples = new_samples.to(device)
-            new_targets = [{k: v.to(device) for k, v in t.items()} for t in targets[start_idx:final_idx]]
-
-            with autocast(**get_autocast_args(args)):
-                outputs = model(new_samples, new_targets)
-                loss_dict = criterion(outputs, new_targets)
-                weight_dict = criterion.weight_dict
-                losses = sum(
-                    (1 / args.grad_accum_steps) * loss_dict[k] * weight_dict[k]
-                    for k in loss_dict.keys()
-                    if k in weight_dict
-                )
-
-
-            scaler.scale(losses).backward()
+    with autocast(**get_autocast_args(args)):
+        outputs = model(samples, targets)
+        loss_dict = criterion(outputs, targets)
+        weight_dict = criterion.weight_dict
+        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        losses = losses / args.grad_accum_steps
+        scaler.scale(losses).backward()
 
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
-        loss_dict_reduced_unscaled = {
-            f"{k}_unscaled": v for k, v in loss_dict_reduced.items()
-        }
+        loss_dict_reduced_unscaled = {f"{k}_unscaled": v for k, v in loss_dict_reduced.items()}
         loss_dict_reduced_scaled = {
             k:  v * weight_dict[k]
             for k, v in loss_dict_reduced.items()
             if k in weight_dict
         }
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
-
         loss_value = losses_reduced_scaled.item()
 
         if not math.isfinite(loss_value):
             print(loss_dict_reduced)
             raise ValueError("Loss is {}, stopping training".format(loss_value))
 
-        if max_norm > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        # if max_norm > 0:
+        #     scaler.unscale_(optimizer)
+        #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
-        scaler.step(optimizer)
-        scaler.update()
-        lr_scheduler.step()
-        optimizer.zero_grad()
+        if (data_iter_step + 1) % args.grad_accum_steps == 0 or data_iter_step == len(data_loader) - 1:
+            if max_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            
+            scaler.step(optimizer)
+            scaler.update()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+        
         if ema_m is not None:
             if epoch >= 0:
                 ema_m.update(model)

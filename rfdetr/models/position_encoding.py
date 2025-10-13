@@ -99,68 +99,88 @@ class PositionEmbeddingSine(nn.Module):
 
 
 class PositionEmbeddingLearned(nn.Module):
-    """
-    Absolute pos embedding, learned.
-    """
-    def __init__(self, num_pos_feats=256):
+    def __init__(self, hidden_dim, max_len=60, normalize=True, scale=None):
         super().__init__()
-        self.row_embed = nn.Embedding(120, num_pos_feats)
-        self.col_embed = nn.Embedding(120, num_pos_feats)
+        self.hidden_dim = hidden_dim  # 位置编码总维度
+        self.max_len = max_len        # 最大行列长度（用于初始化嵌入）
+        self.normalize = normalize    # 是否归一化有效区域
+        self.scale = scale if scale is not None else 2.0  # 缩放因子
+        
+        # 行/列嵌入各占一半维度
+        self.row_embed = nn.Embedding(max_len, hidden_dim // 2)
+        self.col_embed = nn.Embedding(max_len, hidden_dim // 2)
         self.reset_parameters()
-        self._export = False
-    
-    def export(self):
-        raise NotImplementedError
 
     def reset_parameters(self):
-        nn.init.uniform_(self.row_embed.weight)
-        nn.init.uniform_(self.col_embed.weight)
+        # 初始化嵌入参数
+        nn.init.uniform_(self.row_embed.weight, -0.02, 0.02)
+        nn.init.uniform_(self.col_embed.weight, -0.02, 0.02)
 
-    # def forward(self, tensor_list: NestedTensor, align_dim_orders = False):
-    #     x = tensor_list.tensors
-    #     h, w = x.shape[:2]
-    #     i = torch.arange(w, device=x.device)
-    #     j = torch.arange(h, device=x.device)
-    #     x_emb = self.col_embed(i)
-    #     y_emb = self.row_embed(j)
-    #     pos = torch.cat([
-    #         x_emb.unsqueeze(0).repeat(h, 1, 1),
-    #         y_emb.unsqueeze(1).repeat(1, w, 1),
-    #     ], dim=-1).unsqueeze(2).repeat(1, 1, x.shape[2], 1)
-    #     # return: (H, W, bs, C)
-    #     return pos
-    def forward(self, tensor_list: NestedTensor, align_dim_orders = False):
-        x = tensor_list.tensors
-        h, w = x.shape[2:]
-        
-        i = torch.arange(w, device=x.device)
-        j = torch.arange(h, device=x.device)
-        
-        max_col_index = self.col_embed.num_embeddings - 1
-        max_row_index = self.row_embed.num_embeddings - 1
-        
-        if i.max() > max_col_index:
-            print(f"WARNING: Column index {i.max()} exceeds max valid index {max_col_index}")
-        if j.max() > max_row_index:
-            print(f"WARNING: Row index {j.max()} exceeds max valid index {max_row_index}")
-        
-        try:
-            x_emb = self.col_embed(i)
-        except Exception as e:
-            print(f"Error in col_embed lookup: {e}")
-            raise
-        try:
-            y_emb = self.row_embed(j)
-        except Exception as e:
-            print(f"Error in row_embed lookup: {e}")
-            raise
-        
-        pos = torch.cat([
-            x_emb.unsqueeze(0).repeat(h, 1, 1),
-            y_emb.unsqueeze(1).repeat(1, w, 1),
-        ], dim=-1).unsqueeze(2).repeat(1, 1, x.shape[0], 1)
-        
-        return pos
+    def forward(self, tensor_list: NestedTensor, align_dim_orders=False):
+        """从mask中获取维度，避免依赖x的形状"""
+        mask = tensor_list.mask  # (bs, H, W)
+        assert mask is not None, "mask不能为空"
+        # 从mask获取批次大小和特征图尺寸（不再使用x）
+        bs, h, w = mask.shape
+        device = mask.device
+        return self._compute_pos_emb(mask, h, w, device, align_dim_orders)
+
+    def forward_export(self, mask: torch.Tensor, align_dim_orders=False):
+        """导出专用接口，仅用mask计算位置编码"""
+        assert mask is not None, "mask不能为空"
+        bs, h, w = mask.shape  # 直接从mask获取维度
+        device = mask.device
+        return self._compute_pos_emb(mask, h, w, device, align_dim_orders)
+
+    def export(self):
+        """模型导出配置：冻结参数并切换到推理模式"""
+        self.eval()
+        for param in self.parameters():
+            param.requires_grad = False
+        return self
+
+    def _compute_pos_emb(self, mask, h, w, device, align_dim_orders):
+        """核心计算逻辑：基于mask生成位置编码"""
+        # 1. 生成基础行/列索引并获取可学习嵌入
+        row_idx = torch.arange(self.max_len, device=device)  # (max_len,)
+        col_idx = torch.arange(self.max_len, device=device)  # (max_len,)
+        row_emb = self.row_embed(row_idx)  # (max_len, hidden_dim//2)
+        col_emb = self.col_embed(col_idx)  # (max_len, hidden_dim//2)
+
+        # 2. 插值到目标尺寸（h, w）
+        row_emb = row_emb.permute(1, 0).unsqueeze(0)  # (1, C//2, max_len)
+        col_emb = col_emb.permute(1, 0).unsqueeze(0)  # (1, C//2, max_len)
+        row_emb = F.interpolate(row_emb, size=h, mode="linear", align_corners=False)  # (1, C//2, h)
+        col_emb = F.interpolate(col_emb, size=w, mode="linear", align_corners=False)  # (1, C//2, w)
+
+        # 3. 扩展到批次维度并广播为特征图尺寸
+        row_emb = row_emb.repeat(bs, 1, 1).unsqueeze(3)  # (bs, C//2, h, 1)
+        col_emb = col_emb.repeat(bs, 1, 1).unsqueeze(2)  # (bs, C//2, 1, w)
+        row_emb = row_emb.expand(-1, -1, -1, w)  # (bs, C//2, h, w)
+        col_emb = col_emb.expand(-1, -1, h, -1)  # (bs, C//2, h, w)
+
+        # 4. 拼接行/列嵌入并处理mask
+        pos_emb = torch.cat([row_emb, col_emb], dim=1)  # (bs, hidden_dim, h, w)
+        not_mask = ~mask  # (bs, h, w)：有效区域为True
+        pos_emb = pos_emb * not_mask.unsqueeze(1).float()  # padding区域归零
+
+        # 5. 归一化有效区域（与原始正弦编码逻辑一致）
+        if self.normalize:
+            eps = 1e-6
+            h_valid = not_mask.sum(dim=1, keepdim=True).float()  # (bs, 1, w)：每行有效像素数
+            w_valid = not_mask.sum(dim=2, keepdim=True).float()  # (bs, h, 1)：每列有效像素数
+            h_valid = torch.clamp(h_valid, min=eps)
+            w_valid = torch.clamp(w_valid, min=eps)
+            # 对行/列嵌入分别缩放
+            pos_emb[:, :self.hidden_dim//2, :, :] *= (self.scale / h_valid).unsqueeze(1)
+            pos_emb[:, self.hidden_dim//2:, :, :] *= (self.scale / w_valid).unsqueeze(1)
+
+        # 6. 调整维度顺序（默认返回 (bs, C, H, W)）
+        if align_dim_orders:
+            pos_emb = pos_emb.permute(2, 3, 0, 1)  # (H, W, bs, C)
+        # else: 保持 (bs, C, H, W)
+
+        return pos_emb
 
 
 def build_position_encoding(hidden_dim, position_embedding):
@@ -169,7 +189,7 @@ def build_position_encoding(hidden_dim, position_embedding):
         # TODO find a better way of exposing other arguments
         position_embedding = PositionEmbeddingSine(N_steps, normalize=True)
     elif position_embedding in ('learned'):
-        position_embedding = PositionEmbeddingLearned(N_steps)
+        position_embedding = PositionEmbeddingLearned(hidden_dim)
         # print("position_embedding",position_embedding)
     elif position_embedding in ('rope', 'v3'):
         position_embedding = RopePositionEmbedding(embed_dim=hidden_dim)

@@ -24,6 +24,7 @@ import torch.nn.functional as F
 from torch import nn, Tensor
 
 from rfdetr.models.ops.modules import MSDeformAttn
+from typing import Tuple
 
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
@@ -139,7 +140,8 @@ class Transformer(nn.Module):
                  num_feature_levels=4, dec_n_points=4,
                  lite_refpoint_refine=False,
                  decoder_norm_type='LN',
-                 bbox_reparam=False):
+                 bbox_reparam=False,
+                 sa_type="normal"):
         super().__init__()
         self.encoder = None
 
@@ -148,7 +150,7 @@ class Transformer(nn.Module):
                                                 group_detr=group_detr,
                                                 num_feature_levels=num_feature_levels,
                                                 dec_n_points=dec_n_points,
-                                                skip_self_attn=False,)
+                                                skip_self_attn=False, sa_type=sa_type)
         assert decoder_norm_type in ['LN', 'Identity']
         norm = { 
             "LN": lambda channels: nn.LayerNorm(channels),
@@ -463,10 +465,13 @@ class TransformerDecoderLayer(nn.Module):
     def __init__(self, d_model, sa_nhead, ca_nhead, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False, group_detr=1, 
                  num_feature_levels=4, dec_n_points=4, 
-                 skip_self_attn=False):
+                 skip_self_attn=False, sa_type="normal"):
         super().__init__()
         # Decoder Self-Attention
-        self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=sa_nhead, dropout=dropout, batch_first=True)
+        if sa_type=="normal":
+            self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=sa_nhead, dropout=dropout, batch_first=True)
+        elif sa_type=="diff":
+            self.self_attn = DiffAttention(embed_dim=d_model, num_heads=sa_nhead,  qkv_bias=True, attn_drop=dropout, proj_drop=dropout, lambda_init=0.8)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -595,6 +600,7 @@ def build_transformer(args):
         lite_refpoint_refine=args.lite_refpoint_refine,
         decoder_norm_type=args.decoder_norm,
         bbox_reparam=args.bbox_reparam,
+        # sa_type=args.decoder_sa_type,
     )
 
 
@@ -607,3 +613,147 @@ def _get_activation_fn(activation):
     if activation == "glu":
         return F.glu
     raise RuntimeError(F"activation should be relu/gelu, not {activation}.")
+
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(dim))
+        else:
+            self.register_parameter('weight', None)
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output = self._norm(x.float()).type_as(x)
+        if self.weight is not None:
+            output = output * self.weight
+        return output
+
+    def extra_repr(self) -> str:
+        return f'dim={self.dim}, eps={self.eps}, elementwise_affine={self.weight is not None}'
+
+class DiffAttention(nn.Module):
+    r"""
+    Differential Attention Module.
+
+    Given an input tensor X ∈ ℝ^(B×N×d_model), we first compute the linear projections:
+
+        Q = X Wᵠ, K = X Wᵏ, V = X Wᵛ
+
+    The queries and keys are then reshaped and split into two parts:
+        Q → [Q₁; Q₂] ∈ ℝ^(B, N, 2·h_effective, d_head)
+        K → [K₁; K₂] ∈ ℝ^(B, N, 2·h_effective, d_head)
+    with h_effective = num_heads // 2 and d_head = d_model / num_heads.
+
+    The value projection is reshaped to:
+        V ∈ ℝ^(B, N, h_effective, 2·d_head)
+
+    We then compute two attention maps:
+        A₁ = softmax((Q₁ K₁ᵀ) / √d_head)
+        A₂ = softmax((Q₂ K₂ᵀ) / √d_head)
+
+    A learnable scalar λ is computed via:
+        λ = exp(λ_{q1} ⋅ λ_{k1}) − exp(λ_{q2} ⋅ λ_{k2}) + λ_init
+
+    Finally, the differential attention output is:
+        DiffAttn(X) = (A₁ − λ · A₂) · V
+
+    The per-head outputs are then normalized headwise with RMSNorm and projected back to d_model.
+
+    Args:
+        dim (int): Embedding dimension (d_model).
+        num_heads (int): Number of heads in the original transformer (must be even).
+        qkv_bias (bool): If True, add a bias term to the Q, K, V projections.
+        attn_drop (float): Dropout probability after softmax.
+        proj_drop (float): Dropout probability after the output projection.
+        lambda_init (float): Initial constant for lambda re-parameterization.
+    """
+    def __init__(self, embed_dim, num_heads=8, qkv_bias=True, attn_drop=0., proj_drop=0., lambda_init=0.8):
+        super().__init__()
+        if num_heads % 2 != 0:
+            raise ValueError("num_heads must be even for Differential Attention.")
+        self.dim = embed_dim
+        self.num_heads = num_heads # original number of heads
+        self.effective_heads = num_heads // 2  # differential attention operates on half as many heads
+        self.head_dim = embed_dim // num_heads # per-head dimension
+        self.scaling = self.head_dim ** -0.5
+
+        # Linear projections for Q, K, V: mapping from embed_dim → embed_dim.
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True) # final output projection
+
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        # RMSNorm for headwise normalization on outputs (each head's output has dimension 2·head_dim)
+        self.diff_norm = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=True)
+
+        # Learnable lambda parameters (shared across all heads)
+        self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_init = lambda_init
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = False,
+        **kwargs
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        B, N_q, _ = q.shape
+        _, N_k, _ = k.shape
+        assert q.shape[-1] == self.dim and k.shape[-1] == self.dim and v.shape[-1] == self.dim, \
+            f"q/k/v dim must be {self.dim} (got q_dim={q.shape[-1]}, k_dim={k.shape[-1]}, v_dim={v.shape[-1]})"
+
+        q = q.view(B, N_q, 2 * self.effective_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, N_k, 2 * self.effective_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, N_k, self.effective_heads, 2 * self.head_dim).transpose(1, 2)
+
+        q = q * self.scaling
+
+        attn_scores = torch.matmul(q, k.transpose(-1, -2))
+
+        if attn_mask is not None:
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
+            elif attn_mask.dim() == 3:
+                attn_mask = attn_mask.view(B, 2 * self.effective_heads, N_q, N_k)
+            attn_scores = attn_scores.masked_fill(attn_mask.bool(), -1e9)
+
+        if key_padding_mask is not None:
+            key_padding_mask = key_padding_mask.unsqueeze(1).unsqueeze(1)
+            attn_scores = attn_scores.masked_fill(key_padding_mask.bool(), -1e9)
+
+
+        attn_probs = F.softmax(attn_scores, dim=-1)  # (B, 2×h_eff, N_q, N_k)
+        attn_probs = self.attn_drop(attn_probs)
+
+        attn_probs = attn_probs.view(B, self.effective_heads, 2, N_q, N_k)
+
+        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1))
+        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2))
+        lambda_full = lambda_1 - lambda_2 + self.lambda_init
+
+        diff_attn = attn_probs[:, :, 0] - lambda_full * attn_probs[:, :, 1]
+
+        attn_output = torch.matmul(diff_attn, v)  # (B, h_eff, N_q, 2×head_dim)
+        attn_output = self.diff_norm(attn_output) * (1 - self.lambda_init)
+
+        attn_output = attn_output.transpose(1, 2)  # (B, N_q, h_eff, 2×head_dim)
+        attn_output = attn_output.reshape(B, N_q, self.dim)
+
+        x_out = self.out_proj(attn_output)
+        x_out = self.proj_drop(x_out)
+
+        attn_weights = diff_attn if need_weights else None
+        return x_out, attn_weights

@@ -1,161 +1,190 @@
+import math
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-# 模拟模型类（仅用于提供配置参数）
-class MockModel:
-    def __init__(self, num_windows, num_register_tokens):
-        self.num_windows = num_windows  # 窗口数（如2）
-        self.num_register_tokens = num_register_tokens  # 每个窗口的reg数量（如2）
+# ---------------------------------------------------------
+# Register model decorator: Try to import timm's version; if unavailable, use a dummy.
+try:
+    from timm.models.registry import register_model
+except ImportError:
+    def register_model(fn):
+        return fn
 
-def char_to_tensor(char_list, C=1):
-    """将字符列表转换为张量（用字符的ASCII码作为数值，便于反向解析）"""
-    # 为每个字符分配唯一数值（如cls1→101, reg1-1→201, patch1-1→301）
-    char_to_val = {}
-    val = 100  # 起始数值，避免与0冲突
-    for char in char_list:
-        if char not in char_to_val:
-            char_to_val[char] = val
-            val += 1
-    # 转换为张量（形状：(len(char_list), C)）
-    tensor = torch.tensor([[char_to_val[char]] for char in char_list], dtype=torch.float32)
-    return tensor, char_to_val
+# Import timm's VisionTransformer and common layers.
+from timm.models.vision_transformer import VisionTransformer
+from timm.models.layers import DropPath, Mlp
 
-def tensor_to_char(tensor, char_to_val):
-    """将张量反向解析为字符列表"""
-    val_to_char = {v: k for k, v in char_to_val.items()}
-    return [val_to_char[round(val.item())] for val in tensor[:, 0]]
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(dim))
+        else:
+            self.register_parameter('weight', None)
 
-def test_rearrange_and_restore():
-    # -------------------------- 1. 配置参数 --------------------------
-    model = MockModel(num_windows=2, num_register_tokens=2)  # 2窗口→4个窗口（2²），每个窗口2个reg
-    num_windows_squared = model.num_windows ** 2  # 4个窗口
-    num_patches_per_window = 3  # 每个窗口3个patch
-    C = 1  # 特征维度
-    B_original = num_windows_squared  # 原始批次大小（4，每个窗口对应1个样本）
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output = self._norm(x.float()).type_as(x)
+        if self.weight is not None:
+            output = output * self.weight
+        return output
+
+    def extra_repr(self) -> str:
+        return f'dim={self.dim}, eps={self.eps}, elementwise_affine={self.weight is not None}'
+
+class DiffAttention(nn.Module):
+    r"""
+    Differential Attention Module.
+
+    Given an input tensor X ∈ ℝ^(B×N×d_model), we first compute the linear projections:
+
+        Q = X Wᵠ, K = X Wᵏ, V = X Wᵛ
+
+    The queries and keys are then reshaped and split into two parts:
+        Q → [Q₁; Q₂] ∈ ℝ^(B, N, 2·h_effective, d_head)
+        K → [K₁; K₂] ∈ ℝ^(B, N, 2·h_effective, d_head)
+    with h_effective = num_heads // 2 and d_head = d_model / num_heads.
+
+    The value projection is reshaped to:
+        V ∈ ℝ^(B, N, h_effective, 2·d_head)
+
+    We then compute two attention maps:
+        A₁ = softmax((Q₁ K₁ᵀ) / √d_head)
+        A₂ = softmax((Q₂ K₂ᵀ) / √d_head)
+
+    A learnable scalar λ is computed via:
+        λ = exp(λ_{q1} ⋅ λ_{k1}) − exp(λ_{q2} ⋅ λ_{k2}) + λ_init
+
+    Finally, the differential attention output is:
+        DiffAttn(X) = (A₁ − λ · A₂) · V
+
+    The per-head outputs are then normalized headwise with RMSNorm and projected back to d_model.
+
+    Args:
+        dim (int): Embedding dimension (d_model).
+        num_heads (int): Number of heads in the original transformer (must be even).
+        qkv_bias (bool): If True, add a bias term to the Q, K, V projections.
+        attn_drop (float): Dropout probability after softmax.
+        proj_drop (float): Dropout probability after the output projection.
+        lambda_init (float): Initial constant for lambda re-parameterization.
+    """
+    def __init__(self, dim, num_heads=8, qkv_bias=True, attn_drop=0., proj_drop=0., lambda_init=0.8):
+        super().__init__()
+        if num_heads % 2 != 0:
+            raise ValueError("num_heads must be even for Differential Attention.")
+        self.dim = dim
+        self.num_heads = num_heads # original number of heads
+        self.effective_heads = num_heads // 2  # differential attention operates on half as many heads
+        self.head_dim = dim // num_heads # per-head dimension
+        self.scaling = self.head_dim ** -0.5
+
+        # Linear projections for Q, K, V: mapping from dim → dim.
+        self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.k_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.v_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.out_proj = nn.Linear(dim, dim, bias=True) # final output projection
+
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        # RMSNorm for headwise normalization on outputs (each head's output has dimension 2·head_dim)
+        self.diff_norm = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=True)
+
+        # Learnable lambda parameters (shared across all heads)
+        self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_init = lambda_init
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (Tensor): Input tensor of shape (B, N, d_model).
+
+        Returns:
+            Tensor of shape (B, N, d_model) after applying differential attention.
+        """
+        B, N, _ = x.shape
+
+        # Compute Q, K, V projections.
+        q = self.q_proj(x) # shape: (B, N, d_model)
+        k = self.k_proj(x) # shape: (B, N, d_model)
+        v = self.v_proj(x) # shape: (B, N, d_model)
+
+        # Reshape Q and K into (B, N, 2 * h_effective, head_dim)
+        q = q.view(B, N, 2 * self.effective_heads, self.head_dim)
+        k = k.view(B, N, 2 * self.effective_heads, self.head_dim)
+        # Reshape V into (B, N, h_effective, 2 * head_dim)
+        v = v.view(B, N, self.effective_heads, 2 * self.head_dim)
+
+        # Transpose to bring head dimension forward.
+        # q, k: (B, 2 * h_effective, N, head_dim)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        # v: (B, h_effective, N, 2 * head_dim)
+        v = v.transpose(1, 2)
+
+        # Scale Q.
+        q = q * self.scaling
+
+        # Compute raw attention scores: (B, 2 * h_effective, N, N)
+        attn_scores = torch.matmul(q, k.transpose(-1, -2))
+
+        # Compute attention probabilities.
+        attn_probs = F.softmax(attn_scores, dim=-1)
+        attn_probs = self.attn_drop(attn_probs)
+
+        # Reshape to separate the two halves: (B, h_effective, 2, N, N)
+        attn_probs = attn_probs.view(B, self.effective_heads, 2, N, N)
+
+        # Compute lambda via re-parameterization.
+        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1))
+        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2))
+        lambda_full = lambda_1 - lambda_2 + self.lambda_init
+
+        # Differential attention: subtract the second attention map scaled by lambda_full.
+        diff_attn = attn_probs[:, :, 0, :, :] - lambda_full * attn_probs[:, :, 1, :, :] # shape: (B, h_effective, N, N)
+
+        # Multiply the differential attention weights with V.
+        attn_output = torch.matmul(diff_attn, v) # shape: (B, h_effective, N, 2 * head_dim)
+
+        # Apply RMSNorm (headwise normalization) and scale by (1 - lambda_init)
+        attn_output = self.diff_norm(attn_output) * (1 - self.lambda_init)
+
+        # Concatenate heads: reshape from (B, h_effective, N, 2 * head_dim) → (B, N, 2 * h_effective * head_dim)
+        attn_output = attn_output.transpose(1, 2).reshape(B, N, 2 * self.effective_heads * self.head_dim)
+
+        # Final linear projection.
+        x_out = self.out_proj(attn_output)
+        x_out = self.proj_drop(x_out)
+        return x_out
     
-    # 每个窗口的字符结构：[clsX, regX-1, regX-2, patchX-1, patchX-2, patchX-3]
-    window_chars = []
-    for win_idx in range(1, num_windows_squared + 1):
-        win_chars = [
-            f"cls{win_idx}",  # 1个cls
-            f"reg{win_idx}-1", f"reg{win_idx}-2",  # 2个reg（对应num_register_tokens=2）
-            f"patch{win_idx}-1", f"patch{win_idx}-2", f"patch{win_idx}-3"  # 3个patch
-        ]
-        window_chars.append(win_chars)
-    
-    # 打印原始窗口结构（字符可视化）
-    print("="*50)
-    print("原始窗口结构（每个窗口的字符序列）：")
-    for i, chars in enumerate(window_chars):
-        print(f"窗口{i+1}: {chars}")
-    
-    # -------------------------- 2. 生成原始张量 --------------------------
-    # 拼接所有窗口的字符，生成原始hidden_states（形状：(B_original, HW, C)）
-    HW = len(window_chars[0])  # 每个窗口的长度：1+2+3=6
-    all_chars = [char for win_chars in window_chars for char in win_chars]
-    hidden_states_original, char_to_val = char_to_tensor(all_chars, C=C)
-    hidden_states_original = hidden_states_original.view(B_original, HW, C)  # (4, 6, 1)
-    attention_output_original = hidden_states_original.clone()  # 模拟attention_output（与hidden_states结构一致）
-    
-    print("\n" + "="*50)
-    print(f"原始hidden_states形状: {hidden_states_original.shape}")
-    print(f"原始attention_output形状: {attention_output_original.shape}")
-    
-    # -------------------------- 3. 执行重排列（remove windows） --------------------------
-    run_full_attention = True
-    if run_full_attention:
-        B, HW, C = hidden_states_original.shape
-        cls_per_window = 1
-        reg_per_window = model.num_register_tokens
-        patch_per_window = HW - cls_per_window - reg_per_window
-        num_windows_squared = model.num_windows ** 2
-        B_new = B // num_windows_squared  # 4//4=1
-        
-        # 重排列核心逻辑
-        hidden_states = hidden_states_original.view(B_new, num_windows_squared, HW, C)
-        all_cls = hidden_states[:, :, 0:cls_per_window, :]
-        all_reg = hidden_states[:, :, cls_per_window:cls_per_window + reg_per_window, :]
-        all_patch = hidden_states[:, :, cls_per_window + reg_per_window:, :]
-        
-        flattened_cls = all_cls.reshape(B_new, num_windows_squared * cls_per_window, C)
-        flattened_reg = all_reg.reshape(B_new, num_windows_squared * reg_per_window, C)
-        flattened_patch = all_patch.reshape(B_new, num_windows_squared * patch_per_window, C)
-        
-        hidden_states_rearranged = torch.cat([flattened_cls, flattened_reg, flattened_patch], dim=1)
-        attention_output_rearranged = attention_output_original.view(B_new, num_windows_squared, HW, C)
-        attention_output_rearranged = torch.cat([
-            attention_output_rearranged[:, :, 0:cls_per_window, :].reshape(B_new, num_windows_squared * cls_per_window, C),
-            attention_output_rearranged[:, :, cls_per_window:cls_per_window + reg_per_window, :].reshape(B_new, num_windows_squared * reg_per_window, C),
-            attention_output_rearranged[:, :, cls_per_window + reg_per_window:, :].reshape(B_new, num_windows_squared * patch_per_window, C)
-        ], dim=1)
-    
-    # 解析重排列后的字符序列（可视化）
-    rearranged_chars = tensor_to_char(hidden_states_rearranged[0], char_to_val)
-    print("\n" + "="*50)
-    print(f"重排列后hidden_states形状: {hidden_states_rearranged.shape}")
-    print(f"重排列后字符序列（cls→reg→patch）：")
-    print(rearranged_chars)
-    
-    # -------------------------- 4. 执行恢复（add windows back） --------------------------
-    if run_full_attention:
-        B, HW, C = hidden_states_rearranged.shape
-        num_windows_squared = model.num_windows ** 2
-        cls_per_window = 1
-        reg_per_window = model.num_register_tokens
-        window_seq_length = HW // num_windows_squared  # 24//4=6（每个窗口原始长度）
-        patch_per_window = window_seq_length - cls_per_window - reg_per_window
-        total_cls = num_windows_squared * cls_per_window
-        total_reg = num_windows_squared * reg_per_window
-        
-        # 恢复核心逻辑
-        all_cls = hidden_states_rearranged[:, :total_cls, :].reshape(B, num_windows_squared, cls_per_window, C)
-        all_reg = hidden_states_rearranged[:, total_cls:total_cls+total_reg, :].reshape(B, num_windows_squared, reg_per_window, C)
-        all_patch = hidden_states_rearranged[:, total_cls+total_reg:, :].reshape(B, num_windows_squared, patch_per_window, C)
-        
-        windows = torch.cat([all_cls, all_reg, all_patch], dim=2)
-        hidden_states_restored = windows.reshape(B * num_windows_squared, window_seq_length, C)
-        
-        # 恢复attention_output
-        all_cls_attn = attention_output_rearranged[:, :total_cls, :].reshape(B, num_windows_squared, cls_per_window, C)
-        all_reg_attn = attention_output_rearranged[:, total_cls:total_cls+total_reg, :].reshape(B, num_windows_squared, reg_per_window, C)
-        all_patch_attn = attention_output_rearranged[:, total_cls+total_reg:, :].reshape(B, num_windows_squared, patch_per_window, C)
-        
-        windows_attn = torch.cat([all_cls_attn, all_reg_attn, all_patch_attn], dim=2)
-        attention_output_restored = windows_attn.reshape(B * num_windows_squared, window_seq_length, C)
-    
-    # 解析恢复后的字符序列（可视化）
-    restored_window_chars = []
-    for i in range(num_windows_squared):
-        win_tensor = hidden_states_restored[i]
-        win_chars = tensor_to_char(win_tensor, char_to_val)
-        restored_window_chars.append(win_chars)
-    
-    print("\n" + "="*50)
-    print(f"恢复后hidden_states形状: {hidden_states_restored.shape}")
-    print(f"恢复后窗口结构（每个窗口的字符序列）：")
-    for i, chars in enumerate(restored_window_chars):
-        print(f"窗口{i+1}: {chars}")
-    
-    # -------------------------- 5. 验证一致性 --------------------------
-    print("\n" + "="*50)
-    # 数值验证
-    hidden_states_match = torch.allclose(hidden_states_restored, hidden_states_original)
-    attention_output_match = torch.allclose(attention_output_restored, attention_output_original)
-    
-    # 字符序列验证
-    char_match = True
-    for orig_chars, restored_chars in zip(window_chars, restored_window_chars):
-        if orig_chars != restored_chars:
-            char_match = False
-            break
-    
-    print(f"数值一致性验证：hidden_states {'通过' if hidden_states_match else '失败'}")
-    print(f"数值一致性验证：attention_output {'通过' if attention_output_match else '失败'}")
-    print(f"字符序列一致性验证：{'通过' if char_match else '失败'}")
-    
-    if hidden_states_match and attention_output_match and char_match:
-        print("\n✅ 所有测试通过！重排列和恢复逻辑完全可逆，窗口结构无混乱。")
-    else:
-        print("\n❌ 测试失败！存在结构或顺序不一致。")
+
 
 if __name__ == "__main__":
-    test_rearrange_and_restore()
+
+    # 输入参数
+    batch_size = 1
+    seq_len = 16*16
+    dim = 32
+    num_heads = 8
+
+    # 构造输入张量：形状 [B, N, C]
+    x = torch.randn(batch_size, seq_len, dim).cuda()
+
+    # 实例化 DiffAttention 模块
+    model = DiffAttention(dim=dim, num_heads=num_heads, qkv_bias=True, attn_drop=0.1, proj_drop=0.1, lambda_init=0.8).cuda()
+    print(model)
+
+    # 前向传播
+    output = model(x)
+
+    # 输出形状
+    print("输入形状:", x.shape) # [B, N, C]
+    print("输出形状:", output.shape) # [B, N, C]

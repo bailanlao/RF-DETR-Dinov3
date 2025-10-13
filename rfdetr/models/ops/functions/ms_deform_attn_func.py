@@ -30,8 +30,8 @@ def ms_deform_attn_core_pytorch(value, value_spatial_shapes, sampling_locations,
     # B, n_heads, head_dim, N
     B, n_heads, head_dim, _ = value.shape
     _, Len_q, n_heads, L, P, _ = sampling_locations.shape
-    value_list = value.split([H * W for H, W in value_spatial_shapes], dim=3)
-    sampling_grids = 2 * sampling_locations - 1
+    value_list = value.split([H * W for H, W in value_spatial_shapes], dim=3) # img token each level
+    sampling_grids = 2 * sampling_locations - 1 # (0,1) -> (-1,1)
     sampling_value_list = []
     for lid_, (H, W) in enumerate(value_spatial_shapes):
         # B, n_heads, head_dim, H, W

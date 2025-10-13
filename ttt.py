@@ -488,6 +488,6 @@ if __name__ == "__main__":
 
     test_encoder_forward(encoder_module=core_model.backbone[0].encoder, device=device)
 
-    torch.save({
-        'model': core_model.state_dict(),
-    }, f'medium-dinov3{plus}-randomdecoder.pth')
+    # torch.save({
+    #     'model': core_model.state_dict(),
+    # }, f'medium-dinov3{plus}-randomdecoder.pth')

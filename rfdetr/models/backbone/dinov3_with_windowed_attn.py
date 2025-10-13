@@ -189,6 +189,7 @@ class Dinov3WithRegistersPatchEmbeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
         image_size, patch_size = config.image_size, config.patch_size
+        print("imgsize,patchsize:",image_size, patch_size)
         num_channels, hidden_size = config.num_channels, config.hidden_size
 
         image_size = image_size if isinstance(image_size, collections.abc.Iterable) else (image_size, image_size)
@@ -1127,15 +1128,15 @@ class WindowedDinov3WithRegistersBackbone(WindowedDinov3WithRegistersPreTrainedM
             embedding_output, orig_h, orig_w, win_h, win_w, self.rope_embed, output_hidden_states=True, output_attentions=output_attentions, return_dict=return_dict
         )
 
-        hidden_states = outputs.hidden_states if return_dict else outputs[1]
+        hidden_states = outputs.hidden_states if return_dict else outputs[1] # all hidden states
         # for i,hidden_state in enumerate(hidden_states):
         #     print(f"{i}:",hidden_state[0])
         feature_maps = ()
         for stage, hidden_state in zip(self.stage_names, hidden_states):
             if stage in self.out_features:
-                if self.config.apply_layernorm:
+                if self.config.apply_layernorm: # True
                     hidden_state = self.layernorm(hidden_state)
-                if self.config.reshape_hidden_states:
+                if self.config.reshape_hidden_states: # True
                     hidden_state = hidden_state[:, self.num_register_tokens + 1 :]
                     # this was actually a bug in the original implementation that we copied here,
                     # cause normally the order is height, width

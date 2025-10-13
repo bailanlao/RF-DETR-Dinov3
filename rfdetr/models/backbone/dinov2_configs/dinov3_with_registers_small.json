@@ -37,7 +37,7 @@
     "out_indices": [
       12
     ],
-    "patch_size": 14,
+    "patch_size": 16,
     "qkv_bias": true,
     "reshape_hidden_states": true,
     "stage_names": [

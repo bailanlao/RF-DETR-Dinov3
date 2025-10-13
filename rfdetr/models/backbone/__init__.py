@@ -26,8 +26,10 @@ class Joiner(nn.Sequential):
         """ """
         x = self[0](tensor_list)
         pos = []
-        for x_ in x:
-            pos.append(self[1](x_, align_dim_orders=False).to(x_.tensors.dtype))
+        for i, x_ in enumerate(x):
+            p=self[1](x_, align_dim_orders=False).to(x_.tensors.dtype)
+            pos.append(p)
+            x[i] = NestedTensor(x_.tensors + p, x_.mask)
         return x, pos
 
     def export(self):
@@ -75,6 +77,7 @@ def build_backbone(
     num_windows,
     positional_encoding_size,
     device,
+    select_mode,
 ):
     """
     Useful args:
@@ -105,7 +108,8 @@ def build_backbone(
         patch_size=patch_size,
         num_windows=num_windows,
         positional_encoding_size=positional_encoding_size,
-        device=device
+        device=device,
+        select_mode=select_mode,
     )
 
     model = Joiner(backbone, position_embedding)
