@@ -119,12 +119,12 @@ def train_one_epoch(
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-    with autocast(**get_autocast_args(args)):
-        outputs = model(samples, targets)
-        loss_dict = criterion(outputs, targets)
-        weight_dict = criterion.weight_dict
-        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-        losses = losses / args.grad_accum_steps
+        with autocast(**get_autocast_args(args)):
+            outputs = model(samples, targets)
+            loss_dict = criterion(outputs, targets)
+            weight_dict = criterion.weight_dict
+            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+            losses = losses / args.grad_accum_steps
         scaler.scale(losses).backward()
 
         # reduce losses over all GPUs for logging purposes
@@ -141,10 +141,6 @@ def train_one_epoch(
         if not math.isfinite(loss_value):
             print(loss_dict_reduced)
             raise ValueError("Loss is {}, stopping training".format(loss_value))
-
-        # if max_norm > 0:
-        #     scaler.unscale_(optimizer)
-        #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
         if (data_iter_step + 1) % args.grad_accum_steps == 0 or data_iter_step == len(data_loader) - 1:
             if max_norm > 0:

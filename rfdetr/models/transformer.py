@@ -25,6 +25,7 @@ from torch import nn, Tensor
 
 from rfdetr.models.ops.modules import MSDeformAttn
 from typing import Tuple
+from rfdetr.models.ropeAttn import RopeAttention
 
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
@@ -68,6 +69,38 @@ def gen_sineembed_for_position(pos_tensor, dim=128):
     else:
         raise ValueError("Unknown pos_tensor shape(-1):{}".format(pos_tensor.size(-1)))
     return pos
+
+def gen_ropeembed_for_position(pos_tensor, dim=128, base=100.0):
+    bs, num_queries, pos_dim = pos_tensor.shape
+    device = pos_tensor.device
+    dtype = pos_tensor.dtype
+    scale = 2 * math.pi
+    assert dim % 8 == 0, f"decoder rope dim must be divisible by 8, got {dim}"
+    half_dim = dim // 2
+    per_coord_dim = half_dim // 4
+    dim_t = torch.arange(dim, dtype=dtype, device=device)
+    periods = base ** (2 * (dim_t // 2) / dim)
+
+    angle_list = []
+
+    coord_order = [1, 0]
+    if pos_dim == 4:
+        coord_order.extend([2, 3])
+    for i, coord_idx in enumerate(coord_order):
+        coord = pos_tensor[..., coord_idx]  # (bs, num_queries)
+        start = i * per_coord_dim
+        end = (i + 1) * per_coord_dim
+        periods_i = periods[start:end]
+        # coord.unsqueeze(-1) -> (bs, num_queries, 1)
+        # periods_i.unsqueeze(0).unsqueeze(0) -> (1, 1, per_coord_dim)
+        angles = coord.unsqueeze(-1) * scale / periods_i.unsqueeze(0).unsqueeze(0)
+        angle_list.append(angles)
+
+    angles_half = torch.cat(angle_list, dim=-1) # (bs, num_queries, dim//2)
+    angles = angles_half.tile(1, 1, 2)  # (bs, num_queries, dim)
+    sin = torch.sin(angles)
+    cos = torch.cos(angles)
+    return (sin, cos)
 
 
 def gen_encoder_output_proposals(memory, memory_padding_mask, spatial_shapes, unsigmoid=True):
@@ -158,7 +191,7 @@ class Transformer(nn.Module):
         }
         decoder_norm = norm[decoder_norm_type](d_model)
 
-        self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
+        self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,decoder_sa_nhead=sa_nhead,
                                           return_intermediate=return_intermediate_dec,
                                           d_model=d_model,
                                           lite_refpoint_refine=lite_refpoint_refine,
@@ -243,6 +276,8 @@ class Transformer(nn.Module):
                 # self.enc_out_class_embed deepcopy from lwdetr, classify head (d_model, num_classes)
                 # out: (bs, \sum{hw}, num_classes) background + foreground
                 enc_outputs_class_unselected_gidx = self.enc_out_class_embed[g_idx](output_memory_gidx)
+                
+                # to modify proposal:
                 if self.bbox_reparam: # use valid tokens to generate delta to reparam proposal
                     # self.enc_out_bbox_embed: linear(d_model, 4) deepcopy from lwdetr
                     enc_outputs_coord_delta_gidx = self.enc_out_bbox_embed[g_idx](output_memory_gidx)
@@ -284,9 +319,10 @@ class Transformer(nn.Module):
             refpoint_embed = refpoint_embed.unsqueeze(0).repeat(bs, 1, 1) # bs, num_queries, 4
             if self.two_stage:
                 ts_len = refpoint_embed_ts.shape[-2] # num proposals for first stage
+                # ts modified part
                 refpoint_embed_ts_subset = refpoint_embed[..., :ts_len, :] # two stage part
                 refpoint_embed_subset = refpoint_embed[..., ts_len:, :] # regular part
-
+                # refpoint_embed nums = query nums
                 if self.bbox_reparam:
                     refpoint_embed_cxcy = refpoint_embed_ts_subset[..., :2] * refpoint_embed_ts[..., 2:]
                     refpoint_embed_cxcy = refpoint_embed_cxcy + refpoint_embed_ts[..., :2]
@@ -324,6 +360,7 @@ class TransformerDecoder(nn.Module):
                  decoder_layer,
                  num_layers,
                  norm=None, 
+                 decoder_sa_nhead=8,
                  return_intermediate=False,
                  d_model=256,
                  lite_refpoint_refine=False,
@@ -336,9 +373,9 @@ class TransformerDecoder(nn.Module):
         self.return_intermediate = return_intermediate
         self.lite_refpoint_refine = lite_refpoint_refine
         self.bbox_reparam = bbox_reparam
-
-        self.ref_point_head = MLP(2 * d_model, d_model, d_model, 2)
-
+        self.ref_point_head = MLP(2 * d_model, d_model, d_model, 2) # in hidden out layer
+        self.rope_ref_point_head = MLP(2 * d_model // decoder_sa_nhead, d_model, d_model, 2) # in hidden out layer
+        self.decoder_sa_nhead = decoder_sa_nhead
         self._export = False
     
     def export(self):
@@ -372,36 +409,52 @@ class TransformerDecoder(nn.Module):
 
         intermediate = []
         hs_refpoints_unsigmoid = [refpoints_unsigmoid] # store refpoints for each layer
+        use_rope = True
         
         def get_reference(refpoints):
             # [batch_size, num_queries, 4]
             obj_center = refpoints[..., :4]
             # TODO: 这里使用的是sine的位置编码
             if self._export:
-                query_sine_embed = gen_sineembed_for_position(obj_center, self.d_model / 2) # bs, nq, 256*2 
+                if use_rope:
+                    query_embed = gen_ropeembed_for_position(obj_center, dim=self.d_model // self.decoder_sa_nhead, base=100.0)
+                    # sin, cos  [bs,num_queries, d_model/decoder_sa_nhead]
+                else:
+                    query_embed = gen_sineembed_for_position(obj_center, self.d_model / 2) # bs, nq, 256*2 
+                
                 refpoints_input = obj_center[:, :, None] # bs, nq, 1, 4
             else:
                 refpoints_input = obj_center[:, :, None] \
                                         * torch.cat([valid_ratios, valid_ratios], -1)[:, None] # bs, nq, nlevel, 4
-                query_sine_embed = gen_sineembed_for_position(
-                    refpoints_input[:, :, 0, :], self.d_model / 2) # bs, nq, 256*2 
-            query_pos = self.ref_point_head(query_sine_embed)
-            return obj_center, refpoints_input, query_pos, query_sine_embed
+                if use_rope:
+                    query_embed = gen_ropeembed_for_position(
+                        refpoints_input[:, :, 0, :], dim=self.d_model // self.decoder_sa_nhead, base=100.0
+                    )
+                else:
+                    query_embed = gen_sineembed_for_position(
+                        refpoints_input[:, :, 0, :], self.d_model / 2) # bs, nq, 256*2 
+            if use_rope:
+                # query_embed: sin, cos  [bs,num_queries, d_model/decoder_sa_nhead]
+                # query_pos: [bs,num_queries, d_model]
+                query_pos = self.rope_ref_point_head(torch.cat([query_embed[0], query_embed[1]], dim=-1))
+            else:
+                query_pos = self.ref_point_head(query_embed)
+            return obj_center, refpoints_input, query_pos, query_embed
         
         # always use init refpoints
         if self.lite_refpoint_refine: # only use init refpoints reduce cul
             if self.bbox_reparam:
-                obj_center, refpoints_input, query_pos, query_sine_embed = get_reference(refpoints_unsigmoid)
+                obj_center, refpoints_input, query_pos, query_embed = get_reference(refpoints_unsigmoid)
             else:
-                obj_center, refpoints_input, query_pos, query_sine_embed = get_reference(refpoints_unsigmoid.sigmoid())
+                obj_center, refpoints_input, query_pos, query_embed = get_reference(refpoints_unsigmoid.sigmoid())
 
         for layer_id, layer in enumerate(self.layers):
             # iter refine each layer
             if not self.lite_refpoint_refine:
                 if self.bbox_reparam:
-                    obj_center, refpoints_input, query_pos, query_sine_embed = get_reference(refpoints_unsigmoid)
+                    obj_center, refpoints_input, query_pos, query_embed = get_reference(refpoints_unsigmoid)
                 else:
-                    obj_center, refpoints_input, query_pos, query_sine_embed = get_reference(refpoints_unsigmoid.sigmoid())
+                    obj_center, refpoints_input, query_pos, query_embed = get_reference(refpoints_unsigmoid.sigmoid())
 
             # For the first decoder layer, we do not apply transformation over p_s
             pos_transformation = 1
@@ -412,11 +465,11 @@ class TransformerDecoder(nn.Module):
                            memory_mask=memory_mask,
                            tgt_key_padding_mask=tgt_key_padding_mask,
                            memory_key_padding_mask=memory_key_padding_mask,
-                           pos=pos, query_pos=query_pos, query_sine_embed=query_sine_embed, 
+                           pos=pos, query_pos=query_pos, query_embed=query_embed, 
                            is_first=(layer_id == 0),
                            reference_points=refpoints_input,
                            spatial_shapes=spatial_shapes,
-                           level_start_index=level_start_index)
+                           level_start_index=level_start_index,use_rope=use_rope)
 
             if not self.lite_refpoint_refine:
                 # box iterative update
@@ -460,6 +513,8 @@ class TransformerDecoder(nn.Module):
         return output.unsqueeze(0)
 
 
+
+
 class TransformerDecoderLayer(nn.Module):
 
     def __init__(self, d_model, sa_nhead, ca_nhead, dim_feedforward=2048, dropout=0.1,
@@ -472,6 +527,8 @@ class TransformerDecoderLayer(nn.Module):
             self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=sa_nhead, dropout=dropout, batch_first=True)
         elif sa_type=="diff":
             self.self_attn = DiffAttention(embed_dim=d_model, num_heads=sa_nhead,  qkv_bias=True, attn_drop=dropout, proj_drop=dropout, lambda_init=0.8)
+        
+        self.rope_self_attn = RopeAttention(embed_dim=d_model, num_heads=sa_nhead, dropout=dropout, batch_first=True)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -506,28 +563,40 @@ class TransformerDecoderLayer(nn.Module):
                      memory_key_padding_mask: Optional[Tensor] = None,
                      pos: Optional[Tensor] = None,
                      query_pos: Optional[Tensor] = None,
-                     query_sine_embed = None,
+                     query_embed = None,
                      is_first = False,
                      reference_points = None,
                      spatial_shapes=None,
                      level_start_index=None,
+                     use_rope = False,
                      ):
         bs, num_queries, _ = tgt.shape
         
         # ========== Begin of Self-Attention =============
         # Apply projections here
         # shape: batch_size x num_queries x 256
-        q = k = tgt + query_pos
-        v = tgt
-        if self.training:
-            # (bs, 300*13, 256)->[(bs, 300, 256), ...]->(bs*13, 300, 256)
-            q = torch.cat(q.split(num_queries // self.group_detr, dim=1), dim=0)
-            k = torch.cat(k.split(num_queries // self.group_detr, dim=1), dim=0)
-            v = torch.cat(v.split(num_queries // self.group_detr, dim=1), dim=0)
+        if use_rope:
+            # TODO: add rope attn
+            sin,cos = query_embed
+            if self.training:
+                queries=torch.cat(tgt.split(num_queries // self.group_detr, dim=1), dim=0)
+                sin = torch.cat(sin.split(num_queries // self.group_detr, dim=1), dim=0)
+                cos = torch.cat(cos.split(num_queries // self.group_detr, dim=1), dim=0)
+            else:
+                queries=tgt
+            tgt2 = self.rope_self_attn(queries, sin, cos, key_padding_mask=tgt_key_padding_mask)[0]
+        else:
+            q = k = tgt + query_pos
+            v = tgt
+            if self.training:
+                # (bs, 300*13, 256)->[(bs, 300, 256), ...]->(bs*13, 300, 256)
+                q = torch.cat(q.split(num_queries // self.group_detr, dim=1), dim=0)
+                k = torch.cat(k.split(num_queries // self.group_detr, dim=1), dim=0)
+                v = torch.cat(v.split(num_queries // self.group_detr, dim=1), dim=0)
 
-        tgt2 = self.self_attn(q, k, v, attn_mask=tgt_mask, # None
-                            key_padding_mask=tgt_key_padding_mask,
-                            need_weights=False)[0] # between group queries
+            tgt2 = self.self_attn(q, k, v, attn_mask=tgt_mask, # None
+                                key_padding_mask=tgt_key_padding_mask,
+                                need_weights=False)[0] # between group queries
         
         if self.training:
             tgt2 = torch.cat(tgt2.split(bs, dim=0), dim=1) # (bs, 300*13, 256)
@@ -561,15 +630,17 @@ class TransformerDecoderLayer(nn.Module):
                 memory_key_padding_mask: Optional[Tensor] = None,
                 pos: Optional[Tensor] = None,
                 query_pos: Optional[Tensor] = None,
-                query_sine_embed = None,
+                query_embed = None,
                 is_first = False,
                 reference_points = None,
                 spatial_shapes=None,
-                level_start_index=None):
+                level_start_index=None,
+                use_rope = False,
+                 ):
         return self.forward_post(tgt, memory, tgt_mask, memory_mask,
                                  tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos, 
-                                 query_sine_embed, is_first,
-                                 reference_points, spatial_shapes, level_start_index)
+                                 query_embed, is_first,
+                                 reference_points, spatial_shapes, level_start_index, use_rope)
 
 
 def _get_clones(module, N):

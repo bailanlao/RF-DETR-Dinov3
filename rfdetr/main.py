@@ -996,6 +996,7 @@ def populate_args(
     gradient_checkpointing=False,
     # Additional
     subcommand=None,
+    use_fdam=False,
     **extra_kwargs  # To handle any unexpected arguments
 ):
     args = argparse.Namespace(
@@ -1004,6 +1005,7 @@ def populate_args(
         amp=amp,
         lr=lr,
         lr_encoder=lr_encoder,
+        lr_sta=lr_encoder*2.0,
         batch_size=batch_size,
         weight_decay=weight_decay,
         epochs=epochs,
@@ -1095,6 +1097,7 @@ def populate_args(
         early_stopping_min_delta=early_stopping_min_delta,
         early_stopping_use_ema=early_stopping_use_ema,
         gradient_checkpointing=gradient_checkpointing,
+        use_fdam=use_fdam,
         **extra_kwargs
     )
     return args

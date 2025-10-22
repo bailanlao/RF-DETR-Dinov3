@@ -32,6 +32,7 @@ class ModelConfig(BaseModel):
     resolution: int
     group_detr: int = 13
     gradient_checkpointing: bool = False
+    freeze_encoder: bool = False
     positional_encoding_size: int
     decoder_sa_type: Literal["normal", "diff"] = "normal"
 
@@ -103,7 +104,9 @@ class RFDETRMediumConfig(RFDETRBaseConfig):
     patch_size: int = 16
     resolution: int = 576
     positional_encoding_size: int = 36
-    pretrain_weights: Optional[str] = "rf-detr-medium.pth"
+    # pretrain_weights: Optional[str] = "rf-detr-medium.pth"
+    pretrain_weights: Optional[str] = None
+    select_mode: int = 0
 
 class RFDETRMediumV3Config(RFDETRBaseConfig):
     """
@@ -118,6 +121,7 @@ class RFDETRMediumV3Config(RFDETRBaseConfig):
     positional_encoding_size: int = 36
     select_mode: int = 2
     projector_scale: List[Literal["P3", "P4", "P5","P6"]] = ["P4","P5","P6"]
+    use_fdam: bool = True
     # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3.pth"
     pretrain_weights: Optional[str] = None
 

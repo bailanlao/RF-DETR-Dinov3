@@ -684,6 +684,7 @@ def build_model(args):
         num_windows=args.num_windows,
         positional_encoding_size=args.positional_encoding_size,
         select_mode=args.select_mode,
+        use_fdam=args.use_fdam,
         device=device
     )
     if args.encoder_only:

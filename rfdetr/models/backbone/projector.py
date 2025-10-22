@@ -235,6 +235,36 @@ class MultiScaleProjector(nn.Module):
         self.stages_sampling = nn.ModuleList(stages_sampling)
         self.stages = nn.ModuleList(stages)
 
+
+    def init_weights(self):
+        """
+        Initialize weights for all layers in the MultiScaleProjector.
+        Uses appropriate initialization methods based on layer type and activation function.
+        """
+        def _init_weights(module):
+            """Internal function to handle initialization recursively."""
+            if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
+                # Use Kaiming initialization for convolutional layers
+                nn.init.kaiming_uniform_(module.weight, mode='fan_out')
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, LayerNorm):
+                # Initialize LayerNorm weights to 1 and biases to 0
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.BatchNorm2d):
+                # Standard BatchNorm initialization
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Linear):
+                # Kaiming initialization for linear layers
+                nn.init.kaiming_uniform_(module.weight, mode='fan_in')
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        
+        # Apply initialization to all submodules
+        self.apply(_init_weights)
+
     def forward(self, x):
         """
         Args:
@@ -540,9 +570,9 @@ class SKA(nn.Module):
 
 
 class LSConv(nn.Module):
-    def __init__(self, dim, use_sync_bn=True):
+    def __init__(self, dim, lks=7, sks=3, use_sync_bn=True):
         super().__init__()
-        self.lkp = LKP(dim, lks=7, sks=3, groups=8, use_sync_bn=use_sync_bn)
+        self.lkp = LKP(dim, lks=lks, sks=sks, groups=8, use_sync_bn=use_sync_bn)
         self.ska = SKA()
         self.bn = nn.SyncBatchNorm(dim) if use_sync_bn else nn.BatchNorm2d(dim)
 
@@ -550,20 +580,21 @@ class LSConv(nn.Module):
         return self.bn(self.ska(x, self.lkp(x))) + x
 
 
+
 class LSBlock(nn.Module):
-    def __init__(self, ed, depth_idx, stage_idx, use_sync_bn=True):
+    def __init__(self, ed, depth_idx, stage_idx,lsk=7, use_sync_bn=True):
         super().__init__()
         if depth_idx % 2 == 0:
             self.mixer = RepVGGDW(ed, use_sync_bn=use_sync_bn)
-            self.se = SqueezeExcite(ed)  # SE层增强通道注意力
+            self.se = SqueezeExcite(ed)
         else:
-            self.mixer = LSConv(ed, use_sync_bn=use_sync_bn)  # 核心：LSConv
-            self.se = nn.Identity()  # LSConv已含全局信息，暂不额外加SE
-
+            self.mixer = LSConv(ed,lks=lsk, use_sync_bn=use_sync_bn)
+            self.se = nn.Identity()
         self.ffn = Residual(FFN(ed, h=int(ed * 2), use_sync_bn=use_sync_bn))
 
     def forward(self, x):
         return self.ffn(self.se(self.mixer(x)))
+
 
 class LSBasedSpatialTuningAdapter(nn.Module):
     def __init__(self, in_channels=3, num_out_scales=4, init_channels=64, 
@@ -575,68 +606,57 @@ class LSBasedSpatialTuningAdapter(nn.Module):
         self.use_sync_bn = use_sync_bn
         self.device = device or torch.device("cpu")
 
-        # 1. 目标步长与通道配置（严格对齐文档LSNet-T：[8,16,32,64]步长）
+        self.patch_embed = nn.Sequential(
+            Conv2d_BN(in_channels, init_channels // 2, 3, 2, 1, use_sync_bn=use_sync_bn), 
+            nn.ReLU(),
+            Conv2d_BN(init_channels // 2, init_channels, 3, 2, 1, use_sync_bn=use_sync_bn), 
+            nn.ReLU(),
+            Conv2d_BN(init_channels, init_channels * 2, 3, 2, 1, use_sync_bn=use_sync_bn)
+        )
+        
         target_strides = [8, 16, 32, 64][:num_out_scales]
-        self.embed_dims = [init_channels * (2 ** i) for i in range(num_out_scales)]  # 通道翻倍
-        self.block_nums_per_stage = [0, 2, 8, 10][:num_out_scales]  # LSNet-T的Block数量配置
+        self.embed_dims = [init_channels * (2 ** i) for i in range(num_out_scales)]
+        self.block_nums_per_stage = [1, 2, 2, 4][:num_out_scales]
 
-        # 2. 初始1/2下采样（全局层，符合文档轻量化下采样逻辑）
-        self.initial_downsample = nn.Sequential()
-        if in_channels > 0:
-            initial_dw = Conv2d_BN(
-                in_channels, in_channels,
-                ks=3, stride=2, pad=1, groups=in_channels,  # 深度可分离，stride=2
-                use_sync_bn=use_sync_bn
-            )
-            initial_pw = Conv2d_BN(
-                in_channels, init_channels,
-                ks=1, stride=1, pad=0, use_sync_bn=use_sync_bn  # 通道→init_channels
-            )
-            self.initial_downsample = nn.Sequential(initial_dw, nn.ReLU(), initial_pw, nn.ReLU())
-        current_channels = init_channels  # 初始下采样后通道为init_channels
+        current_channels = init_channels * 2
 
-        # 3. 构建每个Stage（核心：循环下采样满足required_stride）
         for idx in range(num_out_scales):
             curr_embed_dim = self.embed_dims[idx]
             curr_total_stride = target_strides[idx]
-            # 前一步长：初始下采样步长（2）或上一Stage总步长
-            prev_total_stride = self.stage_strides[-1] if idx > 0 else 2
-            required_stride = curr_total_stride // prev_total_stride  # 当前Stage需累积的步长
+            prev_total_stride = self.stage_strides[-1] if idx > 0 else 8
+            required_stride = curr_total_stride // prev_total_stride
 
-            stage_layers = nn.ModuleList()
+            stage_layers = []
 
             if required_stride > 1:
-                current_down_accum = 1  # 记录当前Stage内已累积的下采样步长
-                while current_down_accum < required_stride:
-                    # 通道策略：首次下采样→curr_embed_dim，后续保持通道不变
-                    down_out_ch = curr_embed_dim if current_down_accum == 1 else current_channels
-                    # 深度可分离卷积（stride=2，下采样）
-                    down_dw = Conv2d_BN(
-                        current_channels, current_channels,
-                        ks=3, stride=2, pad=1, groups=current_channels,
-                        use_sync_bn=use_sync_bn
-                    )
-                    # 点卷积（调整通道）
-                    down_pw = Conv2d_BN(
-                        current_channels, down_out_ch,
-                        ks=1, stride=1, pad=0, use_sync_bn=use_sync_bn
-                    )
-                    stage_layers.extend([down_dw, nn.ReLU(), down_pw, nn.ReLU()])
-                    # 更新累积步长和当前通道
-                    current_down_accum *= 2
-                    current_channels = down_out_ch
+                down_dw = Conv2d_BN(
+                    current_channels, current_channels,
+                    ks=3, stride=2, pad=1, groups=current_channels,
+                    use_sync_bn=use_sync_bn
+                )
+                down_pw = Conv2d_BN(
+                    current_channels, curr_embed_dim,
+                    ks=1, stride=1, pad=0, use_sync_bn=use_sync_bn
+                )
+                stage_layers.extend([down_dw, nn.ReLU(), down_pw, nn.ReLU()])
+                current_channels = curr_embed_dim
 
             for depth_idx in range(self.block_nums_per_stage[idx]):
+                lsk_value = 21 if idx < 2 else 7
                 stage_layers.append(
                     LSBlock(
                         ed=current_channels,
                         depth_idx=depth_idx,
                         stage_idx=idx,
+                        lsk=lsk_value,
                         use_sync_bn=use_sync_bn
                     )
                 )
 
-            self.stages.append(nn.Sequential(*stage_layers))
+            if stage_layers:
+                self.stages.append(nn.Sequential(*stage_layers))
+            else:
+                self.stages.append(nn.Identity())
             self.stage_channels.append(current_channels)
             self.stage_strides.append(curr_total_stride)
 
@@ -646,7 +666,7 @@ class LSBasedSpatialTuningAdapter(nn.Module):
     def forward(self, x):
         features = []
         out = x.to(self.device) if not self._export else x
-        out = self.initial_downsample(out)
+        out = self.patch_embed(out)
         for stage in self.stages:
             out = stage(out)
             features.append(out)

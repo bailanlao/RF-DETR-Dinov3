@@ -343,20 +343,23 @@ if __name__ == "__main__":
     if plus == 'plus':
         model = RFDETRMediumV3Plus(position_embedding='sine')
     else:
-        model = RFDETRMediumV3(position_embedding='sine')
-    
+        model = RFDETRMediumV3(position_embedding='sine',use_fdam=False)
+        model1=RFDETRMediumV3(position_embedding='sine',use_fdam=True)
     core_model=model.model.model.to(device)
     initialize_weights(core_model)
     pre_transfer_hash = torch.sum(core_model.backbone[0].encoder.encoder.embeddings.patch_embeddings.projection.weight).item()
     print(f"迁移前 core_model 投影层权重总和：{pre_transfer_hash:.4f}")
 
     dinov3_backbone = core_model.backbone[0].encoder
+    dinov3_backbone_1=model1.model.model.backbone[0].encoder
+    print("没有使用FDAM的dinov3_backbone")
     print(dinov3_backbone)
+    print("使用FDAM的dinov3_backbone")
+    print(dinov3_backbone_1)
     tgt_layer0 = dinov3_backbone.encoder.encoder.layer[0]
     print("目标LayerScale参数名：")
     for name, param in tgt_layer0.ls1.named_parameters():
         print(f"ls1参数名：{name}，形状：{param.shape}")
-
     try:
         dinov3_backbone = transfer_dinov3_compatible(
             dinov3=dinov3,

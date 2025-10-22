@@ -17,7 +17,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from dinov3.layers import LayerScale, Mlp, PatchEmbed, RMSNorm,  SwiGLUFFN
 from rfdetr.models.backbone.rope_position_encoding import RopePositionEmbedding
 from dinov3.layers.layer_scale import LayerScale
-from rfdetr.models.backbone.attention import SelfAttention
+from rfdetr.models.backbone.attention import SelfAttention,GroupDynamicScale
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 from transformers.activations import ACT2FN
@@ -111,6 +111,7 @@ class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
         dynamic_attn_class: str | None = None,
         dynamic_ffn_layer: str | None = None,
         dynamic_act_layer: str | None = None,
+        use_fdam: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -150,6 +151,7 @@ class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
         self.pos_embed_rope_dtype = pos_embed_rope_dtype
         self.window_block_indexes = list(range(num_hidden_layers)) if window_block_indexes is None else window_block_indexes
         self.gradient_checkpointing = gradient_checkpointing
+        self.use_fdam = use_fdam
 
         if dynamic_norm_layer is not None:
             if dynamic_norm_layer not in self.DYNAMIC_CLASS_MAPPING["norm_layer"]:
@@ -189,7 +191,6 @@ class Dinov3WithRegistersPatchEmbeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
         image_size, patch_size = config.image_size, config.patch_size
-        print("imgsize,patchsize:",image_size, patch_size)
         num_channels, hidden_size = config.num_channels, config.hidden_size
 
         image_size = image_size if isinstance(image_size, collections.abc.Iterable) else (image_size, image_size)
@@ -289,17 +290,14 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
         B, _, H, W = pixel_values.shape
         target_dtype = self.patch_embeddings.projection.weight.dtype
         x = self.patch_embeddings(pixel_values.to(dtype=target_dtype))  # [B, N, C], N=H/ps*W/ps
-
         if bool_masked_pos is not None:
             x = torch.where(bool_masked_pos.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
 
         cls = self.cls_token.expand(B, -1, -1)
         x = torch.cat([cls, x], dim=1)
-
         # embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
         grid_h = H // self.patch_size
         grid_w = W // self.patch_size
-
         if self.config.num_windows > 1:
             num_wins = self.config.num_windows
             win_grid_h = grid_h // num_wins
@@ -310,7 +308,6 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
             win_grid_w = grid_w
 
         if num_wins > 1:
-            # 按行优先进行左上到右下的划分
             cls_with_pos = x[:, :1]
             pix = x[:, 1:]  # [B, grid_h*grid_w, C]
             pix = pix.view(B, grid_h, grid_w, -1)
@@ -319,7 +316,6 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
             pix = pix.view(B * num_wins * num_wins, win_grid_h * win_grid_w, -1)
             cls_with_pos = cls_with_pos.repeat(num_wins * num_wins, 1, 1)
             x = torch.cat([cls_with_pos, pix], dim=1)
-
         # add register tokens
         if self.config.num_register_tokens > 0:
             x = torch.cat([x[:, :1], self.register_tokens.expand(x.size(0), -1, -1), x[:, 1:]], dim=1)
@@ -540,6 +536,7 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             attn_drop=config.attention_probs_dropout_prob,
             proj_drop=config.attention_probs_dropout_prob,
             mask_k_bias=config.mask_k_bias,
+            use_fdam=config.use_fdam,
         )
 
         self.ls1 = LayerScale(config.hidden_size)
@@ -553,6 +550,12 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             bias=config.ffn_bias,
         )
         self.ls2 = LayerScale(config.hidden_size)
+        self.use_fdam=config.use_fdam
+        if config.use_fdam:
+            self.gamma_1 = nn.Parameter(1e-4 * torch.ones(config.hidden_size))
+            self.gamma_2 = nn.Parameter(1e-4 * torch.ones(config.hidden_size))
+            self.freq_scale_1 = GroupDynamicScale(dim=config.hidden_size)
+            self.freq_scale_2 = GroupDynamicScale(dim=config.hidden_size)
 
     def forward(
         self,
@@ -658,6 +661,17 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             
             attention_output = attention_output.reshape(B, num_windows_squared, window_seq_length, C)
             attention_output = attention_output.reshape(B * num_windows_squared, window_seq_length, C)
+        
+        if self.use_fdam:
+            B, L, C = attention_output.shape
+            L_img=win_h*win_w
+            patch_attention_output = attention_output[:, L-L_img:, :]
+            patch_attention_output = patch_attention_output.reshape(B, win_h, win_w, C)
+            # [B, C, win_h, win_w]
+            patch_attention_output = patch_attention_output.permute(0, 3, 1, 2).contiguous()
+            patch_att_scaled = self.freq_scale_1(patch_attention_output) + patch_attention_output
+            patch_att_scaled = patch_att_scaled.permute(0, 2, 3, 1).contiguous().reshape(B, L_img, C)
+            attention_output[:, L-L_img:, :] = self.gamma_1 * patch_att_scaled
 
         attention_output = self.ls1(attention_output)
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
@@ -669,7 +683,17 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
         layer_output = self.norm2(hidden_states)
         layer_output = self.mlp(layer_output)
         layer_output = self.ls2(layer_output)
-
+        if self.use_fdam:
+            B, L, C = layer_output.shape
+            L_img=win_h*win_w
+            patch_attention_output = layer_output[:, L-L_img:, :]
+            patch_attention_output = patch_attention_output.reshape(B, win_h, win_w, C)
+            # [B, C, win_h, win_w]
+            patch_attention_output = patch_attention_output.permute(0, 3, 1, 2).contiguous()
+            patch_att_scaled = self.freq_scale_2(patch_attention_output) + patch_attention_output
+            patch_att_scaled = patch_att_scaled.permute(0, 2, 3, 1).contiguous().reshape(B, L_img, C)
+            layer_output[:, L-L_img:, :] = self.gamma_2*patch_att_scaled
+        
         # second residual connection
         layer_output = layer_output + hidden_states
         outputs = (layer_output,) + outputs
@@ -701,7 +725,6 @@ class WindowedDinov3WithRegistersEncoder(nn.Module):
         for i, layer_module in enumerate(self.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
-            
             if i > int(self.config.out_features[-1][5:]):
                 # early stop if we have reached the last output feature
                 break
@@ -1121,9 +1144,7 @@ class WindowedDinov3WithRegistersBackbone(WindowedDinov3WithRegistersPreTrainedM
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        # print("input:",pixel_values)
         embedding_output,orig_h,orig_w,win_h,win_w = self.embeddings(pixel_values) # 
-        # print("embedding_output[0]",embedding_output[0])
         outputs = self.encoder(
             embedding_output, orig_h, orig_w, win_h, win_w, self.rope_embed, output_hidden_states=True, output_attentions=output_attentions, return_dict=return_dict
         )

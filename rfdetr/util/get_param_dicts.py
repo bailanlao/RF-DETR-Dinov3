@@ -54,19 +54,37 @@ def get_param_dict(args, model_without_ddp: nn.Module):
         {"params": param, "lr": args.lr * args.lr_component_decay} 
         for param in decoder_params
     ]
+    
+    sta_param_lr_pairs = []
+    if hasattr(backbone, 'select_mode') and backbone.select_mode != 1:
+        if not hasattr(args, 'lr_sta'):
+            args.lr_sta = args.lr * 2.0 
+        
+        sta_named_param_lr_pairs = backbone.get_sta_param_lr_pairs(args, prefix="backbone.0")
+        sta_param_lr_pairs = [param_dict for _, param_dict in sta_named_param_lr_pairs.items()]
+        
+        backbone_param_lr_pairs = [
+            p for p in backbone_param_lr_pairs 
+            if not any(sta_p['params'] is p['params'] for sta_p in sta_param_lr_pairs)
+        ]
 
-    other_params = [
-        p
-        for n, p in model_without_ddp.named_parameters() if (
-            n not in backbone_named_param_lr_pairs and decoder_key not in n and p.requires_grad)
-    ]
+    other_params = []
+    all_param_ids = set()
+    all_param_ids.update(id(p['params']) for p in backbone_param_lr_pairs)
+    all_param_ids.update(id(p['params']) for p in decoder_param_lr_pairs)
+    all_param_ids.update(id(p['params']) for p in sta_param_lr_pairs)
+    
+    for n, p in model_without_ddp.named_parameters():
+        if id(p) not in all_param_ids and p.requires_grad:
+            other_params.append(p)
+    
     other_param_dicts = [
         {"params": param, "lr": args.lr} 
         for param in other_params
     ]
     
     final_param_dicts = (
-        other_param_dicts + backbone_param_lr_pairs + decoder_param_lr_pairs
+        other_param_dicts + backbone_param_lr_pairs + decoder_param_lr_pairs + sta_param_lr_pairs
     )
 
     return final_param_dicts

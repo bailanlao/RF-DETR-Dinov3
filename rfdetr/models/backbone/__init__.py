@@ -22,16 +22,6 @@ class Joiner(nn.Sequential):
         super().__init__(backbone, position_embedding)
         self._export = False
 
-    def forward(self, tensor_list: NestedTensor):
-        """ """
-        x = self[0](tensor_list)
-        pos = []
-        for i, x_ in enumerate(x):
-            p=self[1](x_, align_dim_orders=False).to(x_.tensors.dtype)
-            pos.append(p)
-            x[i] = NestedTensor(x_.tensors + p, x_.mask)
-        return x, pos
-
     def export(self):
         self._export = True
         self._forward_origin = self.forward
@@ -45,11 +35,23 @@ class Joiner(nn.Sequential):
             ):
                 m.export()
 
+    def forward(self, tensor_list: NestedTensor):
+        """ """
+        x = self[0](tensor_list)
+        pos = []
+        for i, x_ in enumerate(x):
+            p=self[1](x_, align_dim_orders=False).to(x_.tensors.dtype)
+            pos.append(p)
+            x[i] = NestedTensor(x_.tensors+p, x_.mask)
+        return x, pos
+
     def forward_export(self, inputs: torch.Tensor):
         feats, masks = self[0](inputs)
         poss = []
-        for feat, mask in zip(feats, masks):
-            poss.append(self[1](mask, align_dim_orders=False).to(feat.dtype))
+        for i, (feat, mask) in enumerate(zip(feats, masks)):
+            pos=self[1](mask, align_dim_orders=False).to(feat.dtype)
+            poss.append(pos)
+            feats[i] = feat + pos
         return feats, None, poss
 
 
@@ -78,6 +80,7 @@ def build_backbone(
     positional_encoding_size,
     device,
     select_mode,
+    use_fdam,
 ):
     """
     Useful args:
@@ -98,6 +101,7 @@ def build_backbone(
         out_feature_indexes=out_feature_indexes,
         projector_scale=projector_scale,
         use_cls_token=use_cls_token,
+        use_fdam=use_fdam,
         layer_norm=layer_norm,
         freeze_encoder=freeze_encoder,
         target_shape=target_shape,

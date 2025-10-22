@@ -61,6 +61,7 @@ class DinoV3(nn.Module):
             num_windows=4,
             positional_encoding_size=37,
             device: torch.device | None = None,
+            use_fdam: bool = False,
             ):
         super().__init__()
 
@@ -74,7 +75,6 @@ class DinoV3(nn.Module):
         
         if not use_windowed_attn:
             assert not gradient_checkpointing, "Gradient checkpointing is not supported for non-windowed attention"
-            assert load_dinov2_weights, "Using non-windowed attention requires loading dinov2 weights from hub"
             self.encoder = AutoBackbone.from_pretrained(
                 name,
                 out_features=[f"stage{i}" for i in out_feature_indexes],
@@ -86,7 +86,8 @@ class DinoV3(nn.Module):
             window_block_indexes = list(window_block_indexes)
 
             dino_config = get_config(size, use_registers)
-
+            dino_config["use_fdam"] = use_fdam
+            
             dino_config["return_dict"] = False
             dino_config["out_features"] = [f"stage{i}" for i in out_feature_indexes]
             dino_config["out_indices"] = out_feature_indexes

@@ -46,6 +46,7 @@ class Backbone(BackboneBase):
                  out_feature_indexes: list=None,
                  projector_scale: list=None,
                  use_cls_token: bool = False,
+                 use_fdam: bool = False,
                  freeze_encoder: bool = False,
                  layer_norm: bool = False,
                  target_shape: tuple[int, int] = (640, 640),
@@ -105,12 +106,43 @@ class Backbone(BackboneBase):
                 patch_size=patch_size,
                 num_windows=num_windows,
                 positional_encoding_size=positional_encoding_size,
+                use_fdam=use_fdam,
                 device=device
             )
         # build encoder + projector as backbone module
         if freeze_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
+            if use_fdam:
+                for layer in self.encoder.encoder.encoder.layer:
+                    if hasattr(layer.attn, 'dy_freq'):
+                        layer.attn.dy_freq.weight.requires_grad = True
+                        layer.attn.dy_freq.bias.requires_grad = True
+                    if hasattr(layer.attn, 'dy_freq_2'):
+                        layer.attn.dy_freq_2.weight.requires_grad = True
+                        layer.attn.dy_freq_2.bias.requires_grad = True
+                    if hasattr(layer.attn, 'star_relu'):
+                        for param in layer.attn.star_relu.parameters():
+                            param.requires_grad = True
+                    if hasattr(layer.attn, 'hf_gamma'):
+                        for param in layer.attn.hf_gamma:
+                            param.requires_grad = True
+                    if hasattr(layer.attn, 'lf_gamma'):
+                        for param in layer.attn.lf_gamma:
+                            param.requires_grad = True
+                    
+                    if hasattr(layer, 'freq_scale_1'):
+                        for param in layer.freq_scale_1.parameters():
+                            param.requires_grad = True
+                    if hasattr(layer, 'freq_scale_2'):
+                        for param in layer.freq_scale_2.parameters():
+                            param.requires_grad = True
+                    if hasattr(layer, 'gamma_1'):
+                        for param in layer.gamma_1:
+                            param.requires_grad = True
+                    if hasattr(layer, 'gamma_2'):
+                        for param in layer.gamma_2:
+                            param.requires_grad = True
 
         self.projector_scale = projector_scale
         assert len(self.projector_scale) > 0
@@ -182,8 +214,7 @@ class Backbone(BackboneBase):
         feats = self.encoder(tensor_list.tensors)
         if self.select_mode == 1:
             feats = self.projector(feats)
-
-        elif self.select_mode == 2:
+        else:
             sta_feats = self.sta(tensor_list.tensors)
             feats = self.multi_bifusion(context_feats=feats, detail_feats=sta_feats)
         
@@ -202,7 +233,7 @@ class Backbone(BackboneBase):
         feats = self.encoder(tensors)
         if self.select_mode == 1:
             feats = self.projector(feats)
-        elif self.select_mode == 2:
+        else:
             sta_feats = self.sta(tensors)
             feats = self.multi_bifusion(context_feats=feats, detail_feats=sta_feats)
 
@@ -241,6 +272,26 @@ class Backbone(BackboneBase):
                 }
         return named_param_lr_pairs
 
+    def get_sta_param_lr_pairs(self, args, prefix: str = "backbone.0"):
+        named_param_lr_pairs = {}
+        for n, p in self.named_parameters():
+            n = prefix + "." + n
+            if "sta" in n and p.requires_grad:
+                # lr = args.lr_sta * get_sta_lr_decay_rate(n)
+                # wd = args.weight_decay * get_sta_weight_decay_rate(n)
+                # named_param_lr_pairs[n] = {
+                #     "params": p,
+                #     "lr": lr,
+                #     "weight_decay": wd,
+                # }
+                lr = args.lr_sta * get_sta_lr_decay_rate(n, args.lr_vit_layer_decay)
+                wd = args.weight_decay * get_sta_weight_decay_rate(n)
+                named_param_lr_pairs[n] = {
+                    "params": p,
+                    "lr": lr,
+                    "weight_decay": wd,
+                }
+        return named_param_lr_pairs
 
 def get_dinov2_lr_decay_rate(name, lr_decay_rate=1.0, num_layers=12):
     """
@@ -270,5 +321,41 @@ def get_dinov2_weight_decay_rate(name, weight_decay_rate=1.0):
         or ("norm" in name)
         or ("embeddings" in name)
     ):
+        weight_decay_rate = 0.0
+    return weight_decay_rate
+
+def get_sta_lr_decay_rate(name, lr_decay_rate=1.0):
+    """
+    Calculate lr decay rate for different STA blocks.
+    
+    Args:
+        name (string): parameter name.
+        lr_decay_rate (float): base lr decay rate.
+    Returns:
+        lr decay rate for the given parameter.
+    """
+    if "sta.conv1" in name or "sta.stem" in name:
+        return lr_decay_rate ** 0.0
+    elif "sta.stage1" in name or "sta.downsample1" in name:
+        return lr_decay_rate ** 1.0
+    elif "sta.stage2" in name or "sta.downsample2" in name:
+        return lr_decay_rate ** 2.0
+    elif "sta.stage3" in name or "sta.downsample3" in name:
+        return lr_decay_rate ** 3.0
+    elif "sta.stage4" in name or "sta.downsample4" in name:
+        return lr_decay_rate ** 4.0 
+    return lr_decay_rate
+
+def get_sta_weight_decay_rate(name, weight_decay_rate=1.0):
+    """
+    Calculate weight decay rate for different STA parameters.
+    
+    Args:
+        name (string): parameter name.
+        weight_decay_rate (float): base weight decay rate.
+    Returns:
+        weight decay rate for the given parameter.
+    """
+    if ("gamma" in name) or ("bias" in name) or ("norm" in name):
         weight_decay_rate = 0.0
     return weight_decay_rate
