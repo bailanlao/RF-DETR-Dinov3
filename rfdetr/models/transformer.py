@@ -655,7 +655,9 @@ def build_transformer(args):
         two_stage = False
     # print("Transformer args:")
     # print(args)
-    return Transformer(
+    
+    # 创建transformer实例
+    transformer = Transformer(
         d_model=args.hidden_dim,
         sa_nhead=args.sa_nheads,
         ca_nhead=args.ca_nheads,
@@ -673,6 +675,13 @@ def build_transformer(args):
         bbox_reparam=args.bbox_reparam,
         # sa_type=args.decoder_sa_type,
     )
+    
+    if hasattr(args, 'feataug_enable'):
+        transformer._feataug_enable = args.feataug_enable
+    if hasattr(args, 'feataug_types'):
+        transformer._feataug_types = args.feataug_types
+        
+    return transformer
 
 
 def _get_activation_fn(activation):

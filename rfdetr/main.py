@@ -213,14 +213,18 @@ class Model:
 
         criterion, postprocessors = build_criterion_and_postprocessors(args)
         model = self.model #RFDETR.model.model
-        model.to(device)
-
         model_without_ddp = model
+        
         if args.distributed:
+            model = model.to(device)
             if args.sync_bn:
                 model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+            # 让DistributedDataParallel处理设备分配，指定当前GPU设备
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
             model_without_ddp = model.module
+        else:
+            model.to(device)
+            model_without_ddp = model
 
         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print('number of params:', n_parameters)
@@ -291,15 +295,16 @@ class Model:
                 dataset_train, 
                 batch_sampler=batch_sampler_train,
                 collate_fn=utils.collate_fn, 
-                num_workers=args.num_workers
+                num_workers=args.num_workers,
+                pin_memory=True
             )
         
         data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                     drop_last=False, collate_fn=utils.collate_fn, 
-                                    num_workers=args.num_workers)
+                                    num_workers=args.num_workers,pin_memory=True)
         data_loader_test = DataLoader(dataset_test, args.batch_size, sampler=sampler_test,
                                     drop_last=False, collate_fn=utils.collate_fn, 
-                                    num_workers=args.num_workers)
+                                    num_workers=args.num_workers,pin_memory=True)
 
         base_ds = get_coco_api_from_dataset(dataset_val)
         base_ds_test = get_coco_api_from_dataset(dataset_test)
@@ -502,7 +507,14 @@ class Model:
 
             total_time = time.time() - start_time
             total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-            print('Training time {}'.format(total_time_str))
+            
+            # Get maximum GPU memory usage
+            max_memory_allocated = 0
+            if torch.cuda.is_available():
+                max_memory_allocated = torch.cuda.max_memory_allocated() / 1024**3  # Convert to GB
+                
+            print('Training time: {}'.format(total_time_str))
+            print('Maximum GPU memory allocated: {:.2f} GB'.format(max_memory_allocated))
             print('Results saved to {}'.format(output_dir / "results.json"))
             
         
@@ -529,6 +541,9 @@ class Model:
             results["class_map"]["test"] = test_metrics
             with open(output_dir / "results.json", "w") as f:
                 json.dump(results, f)
+            print('Training time: {}'.format(total_time_str))
+            print('Maximum GPU memory allocated: {:.2f} GB'.format(max_memory_allocated))
+
 
         for callback in callbacks["on_train_end"]:
             callback()

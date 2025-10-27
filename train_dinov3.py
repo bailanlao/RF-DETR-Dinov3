@@ -31,10 +31,9 @@ parser.add_argument("--lr_encoder", type=float, required=True, help="学习率")
 parser.add_argument("--dataset_file", type=str,default="roboflow",  required=False, help="数据集模式")
 parser.add_argument("--decoder_pos", type=str, default="sine",  required=False, help="decoder pos")
 parser.add_argument("--early_stopping_patience", type=int, default=50,  required=False, help="early_stopping_patience")
-parser.add_argument("--select_mode", type=int, required=True, help="1 rf，2 deim,3 deim->ls")
+parser.add_argument("--select_mode", type=int, required=True, help="1 rf，2 deim")
 parser.add_argument("--use_fdam",type=int,required=False)
-parser.add_argument("--feataug_enable", type=int, required=False, default=1, choices=[0, 1],
-                    help="是否启用特征增强功能: 0表示禁用，1表示启用")
+parser.add_argument("--use_featAug",type=int,required=False,default=0)
 parser.add_argument(
     "--projector_scale",
     type=str,
@@ -44,8 +43,9 @@ parser.add_argument(
 )
 parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 args = parser.parse_args()
-init_distributed_mode(args)
-# 根据 model_size 选择对应的模型
+if 'RANK' not in os.environ or 'WORLD_SIZE' not in os.environ:
+    init_distributed_mode(args)
+
 model_classes = {
     "nano": RFDETRNanoV3,
     "base": RFDETRBase,
@@ -84,8 +84,18 @@ if args.freeze_encoder==0:
 use_fdam=False
 if args.use_fdam==1:
     use_fdam=True
-# 添加feataug_enable参数，用于控制是否启用特征增强功能
-feataug_enable = True  # 这里可以根据需要设置为True或False
+feataug_enable = True
+
+if args.use_featAug==0:
+    feataug_enable=False
+    feataug_types=tuple()
+elif args.use_featAug==1:
+    feataug_types=('flip',)
+elif args.use_featAug==2:
+    feataug_types=('fc',)
+
+print(feataug_enable)
+print(feataug_types)
 model = ModelClass(
     pretrain_weights=args.weight_path,
     freeze_encoder=freeze_encoder,
@@ -93,16 +103,12 @@ model = ModelClass(
     select_mode=args.select_mode,
     projector_scale=args.projector_scale,
     use_fdam=use_fdam,
-    feataug_enable=feataug_enable,  # 传递feataug_enable参数
+    feataug_enable=feataug_enable,
+    feataug_types=feataug_types,
+    use_checkpoint=True,
 )
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 core_model = model.model.model.to(device)
-
-# 确保transformer对象上设置了_feataug_enable属性
-# 这样LWDETR类就可以通过getattr(transformer, "_feataug_enable", False)获取到该参数
-if hasattr(core_model, 'transformer'):
-    core_model.transformer._feataug_enable = feataug_enable
-    print(f"已设置feataug_enable={feataug_enable}到transformer对象")
 
 # --------------------------
 # 1. 单独统计 dino_encoder 的参数数量
@@ -177,9 +183,12 @@ model.train(
     early_stopping=True,
     early_stopping_patience=args.early_stopping_patience,
     output_dir=args.out_dir,
-    multi_scale=True
+    multi_scale=True,
+    use_amp=True,
+
 )
 
 # 清理分布式进程组
 if dist.is_initialized():
     dist.destroy_process_group()
+

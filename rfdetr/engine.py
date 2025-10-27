@@ -116,6 +116,8 @@ def train_one_epoch(
             with torch.inference_mode():
                 samples.tensors = F.interpolate(samples.tensors, size=scale, mode='bilinear', align_corners=False)
                 samples.mask = F.interpolate(samples.mask.unsqueeze(1).float(), size=scale, mode='nearest').squeeze(1).bool()
+            for t in targets:
+                t["size"] = torch.tensor([scale, scale], dtype=torch.int64, device=samples.tensors.device)
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 

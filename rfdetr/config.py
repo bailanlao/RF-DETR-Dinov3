@@ -35,6 +35,8 @@ class ModelConfig(BaseModel):
     freeze_encoder: bool = False
     positional_encoding_size: int
     decoder_sa_type: Literal["normal", "diff"] = "normal"
+    feataug_enable: bool = False
+    feataug_types: List[Literal["crop", "fc", "flip"]] = []
 
 class RFDETRBaseConfig(ModelConfig):
     """

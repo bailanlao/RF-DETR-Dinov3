@@ -111,7 +111,7 @@ if __name__ == "__main__":
     if plus == 'plus':
         model = RFDETRMediumV3Plus(position_embedding='sine')
     else:
-        model = RFDETRMediumV3(position_embedding='sine',use_fdam=True,freeze_encoder=True)
+        model = RFDETRMediumV3(position_embedding='sine',use_fdam=False,freeze_encoder=True)
     core_model=model.model.model.to(device)
     print(core_model)
     initialize_weights(core_model)
@@ -203,4 +203,4 @@ if __name__ == "__main__":
 
     # torch.save({
     #     'model': core_model.state_dict(),
-    # }, f'medium-dinov3{plus}-randomdecoder-fdam.pth')
+    # }, f'medium-dinov3{plus}-randomdecoder.pth')

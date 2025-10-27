@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import kaiming_normal_, constant_
-
+import torch.cuda.amp as amp
 
 class LayerNorm(nn.Module):
     """
@@ -246,6 +246,11 @@ class MultiScaleProjector(nn.Module):
             if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
                 # Use Kaiming initialization for convolutional layers
                 nn.init.kaiming_uniform_(module.weight, mode='fan_out')
+                gain_relu = math.sqrt(2)
+                gain_gelu = math.sqrt(2 / math.pi)
+                gelu_ratio = gain_gelu / gain_relu
+                with torch.no_grad():
+                    module.weight.data *= gelu_ratio
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, LayerNorm):
@@ -417,287 +422,56 @@ class SpatialTuningAdapter(nn.Module):
     def forward(self, x):
         features = []
         out = x.to(self.device)
+        
         for stage in self.stages:
             out = stage(out)
             features.append(out)
+        
+        for i in range(len(features) - 2, -1, -1):
+            current_feat = features[i]
+            next_feat = features[i + 1]
+            
+            next_h, next_w = next_feat.shape[2:]
+            expected_current_h = next_h * 2
+            expected_current_w = next_w * 2
+            
+            current_h, current_w = current_feat.shape[2:]
+            if current_h != expected_current_h or current_w != expected_current_w:
+                features[i] = F.interpolate(
+                    current_feat,
+                    size=(expected_current_h, expected_current_w),
+                    mode="bilinear",
+                    align_corners=False
+                )
+        
         return features
     
     def forward_export(self, x):
         features = []
         out = x
-        for stage in self.stages:
-            out = stage(out)
-            features.append(out)
-        return features
-
-
-class Conv2d_BN(nn.Sequential):
-    def __init__(self, a, b, ks=1, stride=1, pad=0, dilation=1,
-                 groups=1, bn_weight_init=1, use_sync_bn=True):
-                 # a:in_channels, b:out_channels,ks:kernel_size
-        super().__init__()
-        BN = nn.SyncBatchNorm if use_sync_bn else nn.BatchNorm2d
-        self.add_module('c', nn.Conv2d(
-            a, b, ks, stride, pad, dilation, groups, bias=False))
-        self.add_module('bn', BN(b))
-        constant_(self.bn.weight, bn_weight_init)
-        constant_(self.bn.bias, 0)
-
-    @torch.no_grad()
-    def fuse(self):
-        c, bn = self._modules.values()
-        w = bn.weight / (bn.running_var + bn.eps)**0.5
-        w = c.weight * w[:, None, None, None]
-        b = bn.bias - bn.running_mean * bn.weight / (bn.running_var + bn.eps)**0.5
-        m = nn.Conv2d(
-            w.size(1) * self.c.groups, w.size(0), w.shape[2:],
-            stride=self.c.stride, padding=self.c.padding, dilation=self.c.dilation,
-            groups=self.c.groups, device=c.weight.device
-        )
-        m.weight.data.copy_(w)
-        m.bias.data.copy_(b)
-        return m
-
-
-class Residual(nn.Module):
-    def __init__(self, m, drop=0.):
-        super().__init__()
-        self.m = m
-        self.drop = drop
-
-    def forward(self, x):
-        if self.training and self.drop > 0:
-            mask = torch.rand(x.size(0), 1, 1, 1, device=x.device).ge_(self.drop).div(1 - self.drop).detach()
-            return x + self.m(x) * mask
-        else:
-            return x + self.m(x)
-
-
-class FFN(nn.Module):
-    def __init__(self, ed, h, use_sync_bn=True):
-        super().__init__()
-        self.pw1 = Conv2d_BN(ed, h, use_sync_bn=use_sync_bn)
-        self.act = nn.ReLU()
-        self.pw2 = Conv2d_BN(h, ed, bn_weight_init=0, use_sync_bn=use_sync_bn)
-
-    def forward(self, x):
-        return self.pw2(self.act(self.pw1(x)))
-
-
-class SqueezeExcite(nn.Module):
-    def __init__(self, dim, rd_ratio=0.25):
-        super().__init__()
-        self.se = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(dim, int(dim * rd_ratio), kernel_size=1, bias=False),
-            nn.ReLU(),
-            nn.Conv2d(int(dim * rd_ratio), dim, kernel_size=1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        return x * self.se(x)
-
-
-class RepVGGDW(nn.Module):
-    def __init__(self, ed, use_sync_bn=True):
-        super().__init__()
-        self.conv = Conv2d_BN(ed, ed, 3, 1, 1, groups=ed, use_sync_bn=use_sync_bn)
-        self.conv1 = Conv2d_BN(ed, ed, 1, 1, 0, groups=ed, use_sync_bn=use_sync_bn)
-        self.dim = ed
-
-    def forward(self, x):
-        return self.conv(x) + self.conv1(x) + x
-
-    @torch.no_grad()
-    def fuse(self):
-        conv = self.conv.fuse()
-        conv1 = self.conv1.fuse()
-        conv1_w = nn.functional.pad(conv1.weight, [1, 1, 1, 1])
-        identity_w = nn.functional.pad(torch.ones_like(conv1.weight[:, :, :1, :1]), [1, 1, 1, 1])
-        final_w = conv.weight + conv1_w + identity_w
-        final_b = conv.bias + conv1.bias
-        fused_conv = nn.Conv2d(
-            final_w.size(1) * conv.groups, final_w.size(0), final_w.shape[2:],
-            stride=conv.stride, padding=conv.padding, groups=conv.groups, device=conv.weight.device
-        )
-        fused_conv.weight.data.copy_(final_w)
-        fused_conv.bias.data.copy_(final_b)
-        return fused_conv
-
-
-class LKP(nn.Module):
-    def __init__(self, dim, lks=7, sks=3, groups=8, use_sync_bn=True):
-        super().__init__()
-        self.cv1 = Conv2d_BN(dim, dim // 2, use_sync_bn=use_sync_bn)
-        self.act = nn.ReLU()
-        self.cv2 = Conv2d_BN(
-            dim // 2, dim // 2, ks=lks, pad=(lks - 1) // 2, groups=dim // 2, use_sync_bn=use_sync_bn
-        )
-        self.cv3 = Conv2d_BN(dim // 2, dim // 2, use_sync_bn=use_sync_bn)
-        self.cv4 = nn.Conv2d(dim // 2, sks ** 2 * dim // groups, kernel_size=1)
-        self.norm = nn.GroupNorm(num_groups=dim // groups, num_channels=sks ** 2 * dim // groups)
-
-        self.sks = sks
-        self.groups = groups
-        self.dim = dim
-
-    def forward(self, x):
-        x = self.act(self.cv3(self.cv2(self.act(self.cv1(x)))))
-        w = self.norm(self.cv4(x))
-        b, _, h, wd = w.size()
-        return w.view(b, self.dim // self.groups, self.sks ** 2, h, wd) 
-
-
-class SKA(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x, w):
-        B, C, H, W = x.shape
-        G = w.shape[1]
-        Ks = int(math.sqrt(w.shape[2]))
-        group_ch = C // G 
-
-        x_grouped = x.view(B, G, group_ch, H, W)
-        x_unfold = nn.functional.unfold(
-            x_grouped.view(B * G, group_ch, H, W),
-            kernel_size=Ks, padding=(Ks - 1) // 2, stride=1
-        ).view(B, G, group_ch, Ks ** 2, H, W) 
-        w = w.unsqueeze(2)  
-        x_agg = (x_unfold * w).sum(dim=3)
-        return x_agg.view(B, C, H, W)
-
-
-class LSConv(nn.Module):
-    def __init__(self, dim, lks=7, sks=3, use_sync_bn=True):
-        super().__init__()
-        self.lkp = LKP(dim, lks=lks, sks=sks, groups=8, use_sync_bn=use_sync_bn)
-        self.ska = SKA()
-        self.bn = nn.SyncBatchNorm(dim) if use_sync_bn else nn.BatchNorm2d(dim)
-
-    def forward(self, x):
-        return self.bn(self.ska(x, self.lkp(x))) + x
-
-
-
-class LSBlock(nn.Module):
-    def __init__(self, ed, depth_idx, stage_idx,lsk=7, use_sync_bn=True):
-        super().__init__()
-        if depth_idx % 2 == 0:
-            self.mixer = RepVGGDW(ed, use_sync_bn=use_sync_bn)
-            self.se = SqueezeExcite(ed)
-        else:
-            self.mixer = LSConv(ed,lks=lsk, use_sync_bn=use_sync_bn)
-            self.se = nn.Identity()
-        self.ffn = Residual(FFN(ed, h=int(ed * 2), use_sync_bn=use_sync_bn))
-
-    def forward(self, x):
-        return self.ffn(self.se(self.mixer(x)))
-
-
-class LSBasedSpatialTuningAdapter(nn.Module):
-    def __init__(self, in_channels=3, num_out_scales=4, init_channels=64, 
-                 use_sync_bn=True, device=None):
-        super().__init__()
-        self.stages = nn.ModuleList()
-        self.stage_channels = []
-        self.stage_strides = []
-        self.use_sync_bn = use_sync_bn
-        self.device = device or torch.device("cpu")
-
-        self.patch_embed = nn.Sequential(
-            Conv2d_BN(in_channels, init_channels // 2, 3, 2, 1, use_sync_bn=use_sync_bn), 
-            nn.ReLU(),
-            Conv2d_BN(init_channels // 2, init_channels, 3, 2, 1, use_sync_bn=use_sync_bn), 
-            nn.ReLU(),
-            Conv2d_BN(init_channels, init_channels * 2, 3, 2, 1, use_sync_bn=use_sync_bn)
-        )
         
-        target_strides = [8, 16, 32, 64][:num_out_scales]
-        self.embed_dims = [init_channels * (2 ** i) for i in range(num_out_scales)]
-        self.block_nums_per_stage = [1, 2, 2, 4][:num_out_scales]
-
-        current_channels = init_channels * 2
-
-        for idx in range(num_out_scales):
-            curr_embed_dim = self.embed_dims[idx]
-            curr_total_stride = target_strides[idx]
-            prev_total_stride = self.stage_strides[-1] if idx > 0 else 8
-            required_stride = curr_total_stride // prev_total_stride
-
-            stage_layers = []
-
-            if required_stride > 1:
-                down_dw = Conv2d_BN(
-                    current_channels, current_channels,
-                    ks=3, stride=2, pad=1, groups=current_channels,
-                    use_sync_bn=use_sync_bn
-                )
-                down_pw = Conv2d_BN(
-                    current_channels, curr_embed_dim,
-                    ks=1, stride=1, pad=0, use_sync_bn=use_sync_bn
-                )
-                stage_layers.extend([down_dw, nn.ReLU(), down_pw, nn.ReLU()])
-                current_channels = curr_embed_dim
-
-            for depth_idx in range(self.block_nums_per_stage[idx]):
-                lsk_value = 21 if idx < 2 else 7
-                stage_layers.append(
-                    LSBlock(
-                        ed=current_channels,
-                        depth_idx=depth_idx,
-                        stage_idx=idx,
-                        lsk=lsk_value,
-                        use_sync_bn=use_sync_bn
-                    )
-                )
-
-            if stage_layers:
-                self.stages.append(nn.Sequential(*stage_layers))
-            else:
-                self.stages.append(nn.Identity())
-            self.stage_channels.append(current_channels)
-            self.stage_strides.append(curr_total_stride)
-
-        self.init_weights()
-        self._export = False
-
-    def forward(self, x):
-        features = []
-        out = x.to(self.device) if not self._export else x
-        out = self.patch_embed(out)
         for stage in self.stages:
             out = stage(out)
             features.append(out)
+        
+        for i in range(len(features) - 2, -1, -1):
+            current_feat = features[i]
+            next_feat = features[i + 1]
+            
+            next_h, next_w = next_feat.shape[2:]
+            expected_current_h = next_h * 2
+            expected_current_w = next_w * 2
+            
+            current_h, current_w = current_feat.shape[2:]
+            if current_h != expected_current_h or current_w != expected_current_w:
+                features[i] = F.interpolate(
+                    current_feat,
+                    size=(expected_current_h, expected_current_w),
+                    mode="bilinear",
+                    align_corners=False
+                )
+        
         return features
-
-    def init_weights(self):
-        gain_relu = math.sqrt(2)
-        gain_gelu = math.sqrt(2 / math.pi)
-        gelu_ratio = gain_gelu / gain_relu
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                with torch.no_grad():
-                    m.weight.data *= gelu_ratio
-                if m.bias is not None:
-                    constant_(m.bias, 0.0)
-            elif isinstance(m, (nn.SyncBatchNorm, nn.BatchNorm2d)):
-                constant_(m.weight, 1.0)
-                constant_(m.bias, 0.0)
-            elif isinstance(m, nn.GroupNorm):
-                constant_(m.weight, 1.0)
-                constant_(m.bias, 0.0)
-
-    def export(self):
-        self._export = True
-        self._forward_origin = self.forward
-        self.forward = self.forward_export
-
-    def forward_export(self, x):
-        return self.forward(x) 
 
 
 class BiFusion(nn.Module):
@@ -745,7 +519,8 @@ class MultiScaleBiFusion(nn.Module):
 
         self.scale2sta_stride = {2.0:8, 1.0:16, 0.5:32, 0.25:64}
         self.sta_strides = [8,16,32,64]
-
+        self.vit_channels = context_channels_list
+        self.sta_channels = detail_channels_list
         self.enc_indices = list(range(len(context_channels_list)))[-self.num_scales:]
         self.sta_indices = []
         sta_indices_rev = list(range(len(self.sta_strides)))[::-1]
@@ -763,7 +538,19 @@ class MultiScaleBiFusion(nn.Module):
             det_ch = detail_channels_list[sta_idx]   
             self.fusion_layers.append(BiFusion(ctx_ch, det_ch, out_channels))
         self._export = False
+        self.init_weights()
         
+    def init_weights(self):
+        for fusion_layer in self.fusion_layers:
+            if hasattr(fusion_layer, 'init_weights'):
+                fusion_layer.init_weights()
+            for m in fusion_layer.modules():
+                if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
+
+                            
     def export(self):
         self._export = True
         self._forward_origin = self.forward
@@ -779,21 +566,6 @@ class MultiScaleBiFusion(nn.Module):
             sta_feat = detail_feats[sta_idx]
             vit_h, vit_w = vit_feat.shape[2:]
             target_h, target_w = sta_feat.shape[2:]
-
-            try:
-                if isinstance(scale, torch.Tensor):
-                    expected_target_h = int(torch.round(vit_feat.shape[2] * scale).item())
-                    expected_target_w = int(torch.round(vit_feat.shape[3] * scale).item())
-                else:
-                    expected_target_h = int(round(vit_feat.shape[2] * scale))
-                    expected_target_w = int(round(vit_feat.shape[3] * scale))
-            except Exception as e:
-                print(f"Warning: Exception in scale calculation: {e}")
-                expected_target_h = target_h
-                expected_target_w = target_w
-            
-            if (expected_target_h != target_h) or (expected_target_w != target_w):
-                print(f"scale={scale} expected size:({expected_target_h}×{expected_target_w}) target size:({target_h}×{target_w}) use target size")
 
             vit_scaled = F.interpolate(
                 vit_feat,
@@ -823,5 +595,5 @@ class MultiScaleBiFusion(nn.Module):
             )
             fused = self.fusion_layers[i](vit_scaled, sta_feat)
             fused_feats.append(fused)
-        
+            
         return fused_feats

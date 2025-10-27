@@ -34,6 +34,8 @@ from rfdetr.util.box_ops import (box_iou,box_cxcywh_to_xyxy)
 from rfdetr.models.backbone import build_backbone
 from rfdetr.models.matcher import build_matcher
 from rfdetr.models.transformer import build_transformer
+from .feataug import feature_augment_multi, transform_targets_by_meta, FeatAugProjHead
+import random
 
 class LWDETR(nn.Module):
     """ This is the Group DETR v3 module that performs object detection """
@@ -99,6 +101,29 @@ class LWDETR(nn.Module):
             self.transformer.enc_out_class_embed = nn.ModuleList(
                 [copy.deepcopy(self.class_embed) for _ in range(group_detr)])
 
+        # feataug config（由 main.py 注入）
+        self.feataug_enable = getattr(transformer, "_feataug_enable", False)
+        self.feataug_types = getattr(transformer, "_feataug_types", tuple())
+        self.feataug_prob = getattr(transformer, "_feataug_prob", 1.0)
+        self.feataug_crop_min = getattr(transformer, "_feataug_crop_min", 0.6)
+        self.feataug_crop_max = getattr(transformer, "_feataug_crop_max", 1.0)
+        self._feataug_crop_head = None
+        # ==== 提前初始化裁剪投影头（推荐做法） ====
+        use_crop = self.feataug_enable and any(t in self.feataug_types for t in ['crop', 'fc', 'flip_or_crop'])
+        print(f"feataug_types: {self.feataug_types}")
+        if use_crop:
+            # 估计多尺度层数：transformer 或 input_proj 里一般都有
+            if hasattr(self.transformer, 'num_feature_levels'):
+                num_lvls = self.transformer.num_feature_levels
+            elif hasattr(self, 'input_proj'):
+                num_lvls = len(self.input_proj)
+            else:
+                num_lvls = 3
+            ch = hidden_dim
+            self._feataug_crop_head = FeatAugProjHead(num_lvls, ch)
+        else:
+            self._feataug_crop_head = None
+
         self._export = False
 
     def reinitialize_detection_head(self, num_classes):
@@ -141,58 +166,115 @@ class LWDETR(nn.Module):
         """
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
+        # 3,B,C,H,W
         features, poss = self.backbone(samples)
 
-        srcs = []
-        masks = []
+        srcs, masks = [], []
         for l, feat in enumerate(features):
             src, mask = feat.decompose()
-            srcs.append(src)
-            masks.append(mask)
+            srcs.append(src); masks.append(mask)
             assert mask is not None
 
+        if not hasattr(self, "_dbg_printed"):
+            print(f"[DBG] levels: srcs={len(srcs)}, "
+                  f"transformer.num_feature_levels={self.transformer.num_feature_levels}, "
+                  f"has_crop_head={self._feataug_crop_head is not None}")
+            self._dbg_printed = True
+        
+        aug_branches = []
+        if self.training and getattr(self, "feataug_enable", False):
+            # 将 CLI 的 feataug_types 解析成一个模式
+            tset = set(self.feataug_types)
+            if 'fc' in tset or tset == {'flip', 'crop'}:
+                mode = 'fc'  # 同时做 flip 与 crop（K=2）
+            elif 'flip' in tset and 'crop' not in tset:
+                mode = 'flip'  # 全程只做 flip
+            elif 'crop' in tset and 'flip' not in tset:
+                mode = 'crop'  # 全程只做 crop
+            else:
+                mode = 'flip_or_crop'  # 每个 batch 二选一随机
+
+            aug_branches = feature_augment_multi(
+                srcs, masks, poss,
+                aug_type=mode, prob=self.feataug_prob,
+                crop_min_scale=self.feataug_crop_min,
+                crop_max_scale=self.feataug_crop_max,
+            )
+
+        if not hasattr(self, "_dbg_printed2"):
+            print("[DBG] feataug branches:", [m["type"] for *_, m in aug_branches])
+            self._dbg_printed2 = True
+
         if self.training:
-            refpoint_embed_weight = self.refpoint_embed.weight # reference point 
-            query_feat_weight = self.query_feat.weight # init query weight
+            refpoint_embed_weight = self.refpoint_embed.weight
+            query_feat_weight = self.query_feat.weight
         else:
-            # only use one group in inference
             refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
             query_feat_weight = self.query_feat.weight[:self.num_queries]
 
         hs, ref_unsigmoid, hs_enc, ref_enc = self.transformer(
-            srcs, masks, poss, refpoint_embed_weight, query_feat_weight
-            )
+            srcs, masks, poss, refpoint_embed_weight, query_feat_weight)
+        
+        # 组装输出（原路）
+        if self.bbox_reparam:
+            outputs_coord_delta = self.bbox_embed(hs)
+            outputs_coord_cxcy = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
+            outputs_coord_wh   = outputs_coord_delta[..., 2:].exp() * ref_unsigmoid[..., 2:]
+            outputs_coord = torch.concat([outputs_coord_cxcy, outputs_coord_wh], dim=-1)
+        else:
+            outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
+        outputs_class = self.class_embed(hs)
 
-        if hs is not None:
-            if self.bbox_reparam:
-                outputs_coord_delta = self.bbox_embed(hs)
-                outputs_coord_cxcy = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
-                outputs_coord_wh = outputs_coord_delta[..., 2:].exp() * ref_unsigmoid[..., 2:]
-                outputs_coord = torch.concat(
-                    [outputs_coord_cxcy, outputs_coord_wh], dim=-1
-                )
-            else:
-                outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        if self.aux_loss:
+            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
 
-            outputs_class = self.class_embed(hs)
+        # ===== 多个增强分支：逐个送入 transformer，收集输出 =====
+        if len(aug_branches) > 0:
+            feataug_outputs = []
+            feataug_meta_list = []
 
-            out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
-            if self.aux_loss:
-                out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
+            for (srcs_a, masks_a, poss_a, meta) in aug_branches:
+                # 仅裁剪分支走投影头（且仅训练期）
+                if meta['type'] == 'crop' and self._feataug_crop_head is not None and self.training:
+                    srcs_a = self._feataug_crop_head(srcs_a)
+
+                hs_a, ref_a, hs_enc_a, ref_enc_a = self.transformer(
+                    srcs_a, masks_a, poss_a, refpoint_embed_weight, query_feat_weight)
+
+                if self.bbox_reparam:
+                    od_a = self.bbox_embed(hs_a)
+                    ocxcy_a = od_a[..., :2] * ref_a[..., 2:] + ref_a[..., :2]
+                    owh_a = od_a[..., 2:].exp() * ref_a[..., 2:]
+                    ocoord_a = torch.concat([ocxcy_a, owh_a], dim=-1)
+                else:
+                    ocoord_a = (self.bbox_embed(hs_a) + ref_a).sigmoid()
+                ocls_a = self.class_embed(hs_a)
+
+                pack = {
+                    'pred_logits': ocls_a[-1],
+                    'pred_boxes': ocoord_a[-1],
+                }
+                if self.aux_loss:
+                    pack['aux_outputs'] = self._set_aux_loss(ocls_a, ocoord_a)
+
+                feataug_outputs.append(pack)
+                feataug_meta_list.append(meta)
+
+            out['feataug_outputs'] = feataug_outputs
+            out['feataug_meta_list'] = feataug_meta_list
 
         if self.two_stage:
-            group_detr = self.group_detr if self.training else 1
-            hs_enc_list = hs_enc.chunk(group_detr, dim=1)
+            hs_enc_list = hs_enc.split(self.num_queries, dim=1)
             cls_enc = []
-            for g_idx in range(group_detr):
+            group_detr = self.group_detr if self.training else 1
+            # 确保不超出hs_enc_list的实际长度
+            actual_groups = min(group_detr, len(hs_enc_list))
+            for g_idx in range(actual_groups):
                 cls_enc_gidx = self.transformer.enc_out_class_embed[g_idx](hs_enc_list[g_idx])
                 cls_enc.append(cls_enc_gidx)
             cls_enc = torch.cat(cls_enc, dim=1)
-            if hs is not None:
-                out['enc_outputs'] = {'pred_logits': cls_enc, 'pred_boxes': ref_enc}
-            else:
-                out = {'pred_logits': cls_enc, 'pred_boxes': ref_enc}
-        
+            out['enc_outputs'] = {'pred_logits': cls_enc, 'pred_boxes': ref_enc}
         return out
 
     def forward_export(self, tensors):
@@ -539,7 +621,48 @@ class SetCriterion(nn.Module):
                 l_dict = self.get_loss(loss, enc_outputs, targets, indices, num_boxes, **kwargs)
                 l_dict = {k + f'_enc': v for k, v in l_dict.items()}
                 losses.update(l_dict)
+        # featAug
+        w_base = getattr(self, 'feataug_base_weight', 1.0)  # 默认=1
+        w_aug_total = getattr(self, 'feataug_loss_weight', 1.0)
+        if getattr(self, 'feataug_norm_total', False):
+            denom = max(1e-6, (w_base + w_aug_total))
+            w_base /= denom
+            w_aug_total /= denom
 
+        for k in list(losses.keys()):
+            losses[k] = losses[k] * w_base
+
+        # ===== 多个增强分支的损失（原图已算完）=====
+        if 'feataug_outputs' in outputs and 'feataug_meta_list' in outputs:
+            packs = outputs['feataug_outputs']
+            metas = outputs['feataug_meta_list']
+            assert len(packs) == len(metas)
+            K = len(packs)
+
+            coef_each = w_aug_total / max(1, K)  # 均分到每个分支
+
+            for kidx, (pack, meta) in enumerate(zip(packs, metas)):
+                targets_aug = transform_targets_by_meta(targets, meta)
+                indices_aug = self.matcher({k: v for k, v in pack.items() if k != 'aux_outputs'},
+                                           targets_aug, group_detr=self.group_detr if self.training else 1)
+
+                for loss in self.losses:
+                    l_dict = self.get_loss(loss, pack, targets_aug, indices_aug, num_boxes)
+                    for k, v in l_dict.items():
+                        losses[k] = losses.get(k, 0.0) + coef_each * v
+
+                if 'aux_outputs' in pack:
+                    for i, aux_outputs in enumerate(pack['aux_outputs']):
+                        idx_i = self.matcher(aux_outputs, targets_aug,
+                                             group_detr=self.group_detr if self.training else 1)
+                        for loss in self.losses:
+                            kwargs = {}
+                            if loss == 'labels':
+                                kwargs['log'] = False
+                            l_dict = self.get_loss(loss, aux_outputs, targets_aug, idx_i, num_boxes, **kwargs)
+                            key_base = f'aug{kidx}_{i}'
+                            for k, v in l_dict.items():
+                                losses[k + '_' + key_base] = losses.get(k + '_' + key_base, 0.0) + coef_each * v
         return losses
 
 
@@ -631,6 +754,23 @@ class PostProcess(nn.Module):
 
         return results
 
+class FeatAugProjHead(nn.Module):
+    """仅用于裁剪特征的域间隙缩小头；每个尺度一套 1x1 Conv + GN + SiLU。"""
+    def __init__(self, num_levels: int, channels: int, gn_groups: int = 32):
+        super().__init__()
+        gn = max(1, min(gn_groups, channels))
+        self.blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=min(gn, channels), num_channels=channels),
+                nn.SiLU(inplace=True),
+            )
+            for _ in range(num_levels)
+        ])
+
+    def forward(self, srcs: list):
+        assert len(srcs) == len(self.blocks), f"{len(srcs)} vs {len(self.blocks)}"
+        return [blk(x) for blk, x in zip(self.blocks, srcs)]
 
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""

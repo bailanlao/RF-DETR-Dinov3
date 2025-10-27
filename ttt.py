@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import sys
 import numpy as np
+from rfdetr.util.misc import NestedTensor
 
 def print_instance_attributes(obj, indent=0, max_depth=3):
     
@@ -421,7 +422,7 @@ if __name__ == "__main__":
         batch_size = 1
         input_channels = 3
         input_h = 32  # 16×2，确保能被 patch size=16 整除
-        input_w = 32
+        input_w = 64
         dummy_input = torch.randn(batch_size, input_channels, input_h, input_w).to(device)
         print(f"输入张量信息：")
         print(f"  形状：{dummy_input.shape}（batch, channel, h, w）")
@@ -490,7 +491,17 @@ if __name__ == "__main__":
         print("="*60)
 
     test_encoder_forward(encoder_module=core_model.backbone[0].encoder, device=device)
-
+    
+    batch_size = 5
+    input_channels = 3
+    input_h = 32  # 16×2，确保能被 patch size=16 整除
+    input_w = 64
+    dummy_input = torch.randn(batch_size, input_channels, input_h, input_w).to(device)
+    dummy_mask = torch.ones(batch_size, input_h, input_w, dtype=torch.bool).to(device)
+    print(f"输入张量信息：")
+    print(f"  形状：{dummy_input.shape}（batch, channel, h, w）")
+    for f in core_model.backbone[0](NestedTensor(dummy_input,dummy_mask)):
+        print(f.shape)
     # torch.save({
     #     'model': core_model.state_dict(),
     # }, f'medium-dinov3{plus}-randomdecoder.pth')
