@@ -18,7 +18,7 @@ Transformer class
 import math
 import copy
 from typing import Optional
-
+import itertools
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
@@ -240,24 +240,35 @@ class Transformer(nn.Module):
         lvl_pos_embed_flatten = []
         spatial_shapes = []
         valid_ratios = [] if masks is not None else None
-        for lvl, (src, pos_embed) in enumerate(zip(srcs, pos_embeds)):
+
+        for lvl, src in enumerate(srcs):
             bs, c, h, w = src.shape
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
 
-            src = src.flatten(2).transpose(1, 2)                # bs, hw, c
-            pos_embed = pos_embed.flatten(2).transpose(1, 2)    # bs, hw, c
-            lvl_pos_embed_flatten.append(pos_embed)
+            src = src.flatten(2).transpose(1, 2)  # bs, hw, c
             src_flatten.append(src)
+
             if masks is not None:
-                mask = masks[lvl].flatten(1)                    # bs, hw
+                mask = masks[lvl].flatten(1)  # bs, hw
                 mask_flatten.append(mask)
+
+        if len(pos_embeds)>0:
+            if len(pos_embeds) != len(srcs):
+                raise ValueError(f"pos_embeds length ({len(pos_embeds)}) must match srcs length ({len(srcs)})")
+            for lvl, pos_embed in enumerate(pos_embeds):
+                if pos_embed is None:
+                    continue
+                h, w = srcs[lvl].shape[2], srcs[lvl].shape[3]
+                pos_embed = pos_embed.flatten(2).transpose(1, 2)  # bs, hw, c
+                lvl_pos_embed_flatten.append(pos_embed)
+
         memory = torch.cat(src_flatten, 1)    # bs, \sum{hxw}, c 
         if masks is not None:
             mask_flatten = torch.cat(mask_flatten, 1)   # bs, \sum{hxw}
             valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1) # each img valid ratio (bs, 2) w and h
-        
-        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c 
+        if len(lvl_pos_embed_flatten)>0:
+            lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1) # bs, \sum{hxw}, c
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=memory.device) # each level shape (bs, 2) h and w
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         # get the index of flatten tensor 0, lv1, lv2...
@@ -409,7 +420,7 @@ class TransformerDecoder(nn.Module):
 
         intermediate = []
         hs_refpoints_unsigmoid = [refpoints_unsigmoid] # store refpoints for each layer
-        use_rope = True
+        use_rope = False
         
         def get_reference(refpoints):
             # [batch_size, num_queries, 4]
@@ -525,10 +536,10 @@ class TransformerDecoderLayer(nn.Module):
         # Decoder Self-Attention
         if sa_type=="normal":
             self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=sa_nhead, dropout=dropout, batch_first=True)
-        elif sa_type=="diff":
-            self.self_attn = DiffAttention(embed_dim=d_model, num_heads=sa_nhead,  qkv_bias=True, attn_drop=dropout, proj_drop=dropout, lambda_init=0.8)
+        # elif sa_type=="diff":
+        #     self.self_attn = DiffAttention(embed_dim=d_model, num_heads=sa_nhead,  qkv_bias=True, attn_drop=dropout, proj_drop=dropout, lambda_init=0.8)
         
-        self.rope_self_attn = RopeAttention(embed_dim=d_model, num_heads=sa_nhead, dropout=dropout, batch_first=True)
+        # self.rope_self_attn = RopeAttention(embed_dim=d_model, num_heads=sa_nhead, dropout=dropout, batch_first=True)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -648,14 +659,13 @@ def _get_clones(module, N):
 
 
 def build_transformer(args):
-    
     try:
         two_stage = args.two_stage
     except:
         two_stage = False
     # print("Transformer args:")
     # print(args)
-    
+
     # 创建transformer实例
     transformer = Transformer(
         d_model=args.hidden_dim,
@@ -675,14 +685,14 @@ def build_transformer(args):
         bbox_reparam=args.bbox_reparam,
         # sa_type=args.decoder_sa_type,
     )
-    
+
+    # 设置特征增强参数到transformer对象
     if hasattr(args, 'feataug_enable'):
         transformer._feataug_enable = args.feataug_enable
     if hasattr(args, 'feataug_types'):
         transformer._feataug_types = args.feataug_types
-        
-    return transformer
 
+    return transformer
 
 def _get_activation_fn(activation):
     """Return an activation function given a string"""

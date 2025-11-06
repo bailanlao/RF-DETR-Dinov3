@@ -65,15 +65,15 @@ class SelfAttention(nn.Module):
         self.proj = nn.Linear(dim, dim, bias=proj_bias, device=device)
         self.proj_drop = nn.Dropout(proj_drop)
         self.use_fdam = use_fdam
-        if use_fdam:
-            self.dy_freq = nn.Linear(dim, self.num_heads, bias=True)
-            self.hf_gamma= nn.Parameter(1e-5 * torch.ones((dim)),requires_grad=True)
-            self.dy_freq_2 = nn.Linear(dim, self.num_heads, bias=True)
-            self.lf_gamma= nn.Parameter(1e-5 * torch.ones((dim)),requires_grad=True)
-        if use_fdam:
-            self.star_relu = StarReLU()
-        else:
-            self.star_relu=nn.Identity()
+        # if use_fdam:
+        #     self.dy_freq = nn.Linear(dim, self.num_heads, bias=True)
+        #     self.hf_gamma= nn.Parameter(1e-5 * torch.ones((dim)),requires_grad=True)
+        #     self.dy_freq_2 = nn.Linear(dim, self.num_heads, bias=True)
+        #     self.lf_gamma= nn.Parameter(1e-5 * torch.ones((dim)),requires_grad=True)
+        # if use_fdam:
+        #     self.star_relu = StarReLU()
+        # else:
+        #     self.star_relu=nn.Identity()
         
     def apply_rope(self, q: Tensor, k: Tensor, rope: Tensor | Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tensor]:
         # All operations will use the dtype of rope, the output is cast back to the dtype of q and k
@@ -110,21 +110,21 @@ class SelfAttention(nn.Module):
         assert attn_bias is None
         B, N, C = x.shape
         prefix = N - rope[0].shape[-2] # ignore the prefix
-        if self.use_fdam:
-            x_pre=x[:, :prefix]
-            dy_freq_feat=self.star_relu(x[:,prefix:])
-            dy_freq_lf = self.dy_freq_2(dy_freq_feat).tanh_() # B,N,num_heads
-            dy_freq_lf = dy_freq_lf.reshape(B, N - prefix, self.num_heads, 1).repeat(1, 1, 1, C // self.num_heads)
-            dy_freq_lf = dy_freq_lf.reshape(B, N - prefix, C)
-
-            dy_freq = F.softplus(self.dy_freq(dy_freq_feat))
-            dy_freq2 = dy_freq ** 2
-            dy_freq = 2 * dy_freq2 / (dy_freq2 + 0.3678)
-            dy_freq = dy_freq.reshape(B, N - prefix, self.num_heads, 1).repeat(1, 1, 1, C // self.num_heads)
-            dy_freq = dy_freq.reshape(B, N - prefix, C) 
-            if prefix>0: # zero to ignore prefix
-                dy_freq = torch.cat([torch.zeros([B, prefix, C], device=dy_freq.device), dy_freq], dim=1)
-            x = torch.cat((x_pre, dy_freq_feat), dim=-2)
+        # if self.use_fdam:
+        #     x_pre=x[:, :prefix]
+        #     dy_freq_feat=self.star_relu(x[:,prefix:])
+        #     dy_freq_lf = self.dy_freq_2(dy_freq_feat).tanh_() # B,N,num_heads
+        #     dy_freq_lf = dy_freq_lf.reshape(B, N - prefix, self.num_heads, 1).repeat(1, 1, 1, C // self.num_heads)
+        #     dy_freq_lf = dy_freq_lf.reshape(B, N - prefix, C)
+        #
+        #     dy_freq = F.softplus(self.dy_freq(dy_freq_feat))
+        #     dy_freq2 = dy_freq ** 2
+        #     dy_freq = 2 * dy_freq2 / (dy_freq2 + 0.3678)
+        #     dy_freq = dy_freq.reshape(B, N - prefix, self.num_heads, 1).repeat(1, 1, 1, C // self.num_heads)
+        #     dy_freq = dy_freq.reshape(B, N - prefix, C)
+        #     if prefix>0: # zero to ignore prefix
+        #         dy_freq = torch.cat([torch.zeros([B, prefix, C], device=dy_freq.device), dy_freq], dim=1)
+        #     x = torch.cat((x_pre, dy_freq_feat), dim=-2)
 
         qkv = self.qkv(x) # B,N,3C
         C = self.qkv.in_features
@@ -137,14 +137,14 @@ class SelfAttention(nn.Module):
             q, k = self.apply_rope(q, k, rope)
         x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         x = x.transpose(1, 2).reshape(B, N, C)
-        if self.use_fdam:
-            v = v.transpose(1, 2).reshape(B, N, C)
-            v_hf = (v - x)
-            x_patch = x[:, prefix:]
-            x_pre = x[:, :prefix]
-            x_patch = x_patch + x_patch * dy_freq_lf * self.lf_gamma.view(1, 1, -1)
-            x = torch.cat([x_pre, x_patch], dim=1)
-            x = x + dy_freq * v_hf * self.hf_gamma.view(1, 1, -1)
+        # if self.use_fdam:
+        #     v = v.transpose(1, 2).reshape(B, N, C)
+        #     v_hf = (v - x)
+        #     x_patch = x[:, prefix:]
+        #     x_pre = x[:, :prefix]
+        #     x_patch = x_patch + x_patch * dy_freq_lf * self.lf_gamma.view(1, 1, -1)
+        #     x = torch.cat([x_pre, x_patch], dim=1)
+        #     x = x + dy_freq * v_hf * self.hf_gamma.view(1, 1, -1)
         return x
 
 class StarReLU(nn.Module):

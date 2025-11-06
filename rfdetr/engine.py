@@ -70,10 +70,13 @@ def train_one_epoch(
     )
     header = "Epoch: [{}]".format(epoch)
     print_freq = 30
+    if args.dataset_file=='coco':
+        print_freq=300
     start_steps = epoch * num_training_steps_per_epoch
 
-    print("Grad accum steps: ", args.grad_accum_steps)
-    print("Total batch size: ", batch_size * utils.get_world_size())
+    if utils.is_main_process():
+        print("Grad accum steps: ", args.grad_accum_steps)
+        print("Total batch size: ", batch_size * utils.get_world_size())
 
     # Add gradient scaler for AMP
     if DEPRECATED_AMP:
@@ -84,7 +87,8 @@ def train_one_epoch(
     optimizer.zero_grad()
     # assert batch_size % args.grad_accum_steps == 0
     # sub_batch_size = batch_size // args.grad_accum_steps
-    print("LENGTH OF DATA LOADER:", len(data_loader))
+    if utils.is_main_process():
+        print("LENGTH OF DATA LOADER:", len(data_loader))
     for data_iter_step, (samples, targets) in enumerate(
         metric_logger.log_every(data_loader, print_freq, header)
     ):

@@ -167,6 +167,15 @@ class FeatAugProjHead(nn.Module):
             )
             for _ in range(num_levels)
         ])
+        
+    def init_weights(self):
+        """初始化权重"""
+        for block in self.blocks:
+            nn.init.kaiming_normal_(block[0].weight, mode='fan_out', nonlinearity='relu')
+            if hasattr(block[1], 'weight'):
+                nn.init.constant_(block[1].weight, 1.0)
+            if hasattr(block[1], 'bias'):
+                nn.init.constant_(block[1].bias, 0.0)
 
     def forward(self, srcs: list):
         assert len(srcs) == len(self.blocks), f"{len(srcs)} vs {len(self.blocks)}"

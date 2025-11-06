@@ -127,6 +127,23 @@ class RFDETRMediumV3Config(RFDETRBaseConfig):
     # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3.pth"
     pretrain_weights: Optional[str] = None
 
+class RFDETRLargeV3Config(RFDETRBaseConfig):
+    """
+    The configuration for an RF-DETR Large DinoV3 model.
+    """
+    encoder: Literal["dinov3_windowed_small", "dinov3_windowed_base"] = "dinov3_windowed_base"
+    out_feature_indexes: List[int] = [3, 6, 9, 12]
+    num_windows: int = 2
+    dec_layers: int = 4
+    patch_size: int = 16
+    resolution: int = 576
+    positional_encoding_size: int = 36
+    select_mode: int = 2
+    projector_scale: List[Literal["P3", "P4", "P5","P6"]] = ["P4","P5","P6"]
+    use_fdam: bool = True
+    # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3.pth"
+    pretrain_weights: Optional[str] = None
+
 class RFDETRMediumV3PlusConfig(RFDETRBaseConfig):
     """
     The configuration for an RF-DETR Medium DinoV3 Plus model.
@@ -139,6 +156,8 @@ class RFDETRMediumV3PlusConfig(RFDETRBaseConfig):
     resolution: int = 576
     position_embedding: Literal["sine","learned"] = "sine"
     positional_encoding_size: int = 36
+    select_mode: int = 2
+    projector_scale: List[Literal["P3", "P4", "P5","P6"]] = ["P4","P5","P6"]
     # projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P5"] #(P3=2.0, P4=1.0, P5=0.5, P6=0.25)
     # pretrain_weights: Optional[str] = "rf-detr-medium-dinov3-plus.pth"
     decoder_sa_type: Literal["normal", "diff"] = "diff"

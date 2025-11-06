@@ -147,6 +147,9 @@ class RFDETR:
                 f"num_classes mismatch: model has {self.model_config.num_classes} classes, but your dataset has {num_classes} classes\n"
                 f"reinitializing your detection head with {num_classes} classes."
             )
+            if config.dataset_file == "coco" and num_classes == 80:
+                logger.info("COCO dataset use numclasses = 91")
+                num_classes = 91
             self.model.reinitialize_detection_head(num_classes)
         
         train_config = config.dict()
@@ -490,6 +493,17 @@ class RFDETRMediumV3Plus(RFDETR):
     size = "rfdetr-mediumv3"
     def get_model_config(self, **kwargs):
         return RFDETRMediumV3PlusConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return TrainConfig(**kwargs)
+
+class RFDETRLargeV3(RFDETR):
+    """
+    Train an RF-DETR Large model.
+    """
+    size = "rfdetr-largev3"
+    def get_model_config(self, **kwargs):
+        return RFDETRLargeV3Config(**kwargs)
 
     def get_train_config(self, **kwargs):
         return TrainConfig(**kwargs)

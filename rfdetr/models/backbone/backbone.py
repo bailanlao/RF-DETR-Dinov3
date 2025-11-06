@@ -27,7 +27,7 @@ from peft import LoraConfig, get_peft_model, PeftModel
 from rfdetr.util.misc import NestedTensor, is_main_process
 
 from rfdetr.models.backbone.base import BackboneBase
-from rfdetr.models.backbone.projector import MultiScaleProjector,SpatialTuningAdapter,LSBasedSpatialTuningAdapter,MultiScaleBiFusion
+from rfdetr.models.backbone.projector import MultiScaleProjector,SpatialTuningAdapter,MultiScaleBiFusion
 from rfdetr.models.backbone.dinov2 import DinoV2
 from rfdetr.models.backbone.dinov3 import DinoV3
 from typing import Callable
@@ -165,19 +165,6 @@ class Backbone(BackboneBase):
 
         if self.select_mode == 2:
             self.sta = SpatialTuningAdapter(
-                in_channels=sta_in_channels,
-                num_out_scales=len(out_feature_indexes),
-                init_channels=64,
-                device=device
-            )
-            self.multi_bifusion = MultiScaleBiFusion(
-                scale_factors=scale_factors,
-                context_channels_list=self.encoder._out_feature_channels,
-                detail_channels_list=self.sta.stage_channels,
-                out_channels=out_channels
-            )
-        elif select_mode==3:
-            self.sta = LSBasedSpatialTuningAdapter(
                 in_channels=sta_in_channels,
                 num_out_scales=len(out_feature_indexes),
                 init_channels=64,

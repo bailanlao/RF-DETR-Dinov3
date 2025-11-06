@@ -55,6 +55,34 @@ class CocoDetection(torchvision.datasets.CocoDetection):
 
 class ConvertCoco(object):
 
+    def __init__(self):
+        super().__init__()
+        # 使用标准COCO 80类别映射表
+        self.category_id_to_index = self._get_standard_coco_mapping()
+        self._category_mapping_initialized = True
+
+    def _get_standard_coco_mapping(self):
+        """返回标准COCO 80类别的ID到索引映射"""
+        # 标准COCO类别ID列表（不连续的原始ID）
+        standard_coco_ids = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+            22, 23, 24, 25, 27, 28, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+            43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+            62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84,
+            85, 86, 87, 88, 89, 90
+        ]
+        
+        # 创建从原始ID到连续索引的映射（从0开始）
+        category_id_to_index = {}
+        for idx, cat_id in enumerate(standard_coco_ids):
+            category_id_to_index[cat_id] = idx
+        
+        print(f"使用标准COCO类别映射：共{len(standard_coco_ids)}个类别")
+        print(f"支持的类别ID范围：{min(standard_coco_ids)} - {max(standard_coco_ids)}")
+        print(f"映射后索引范围：0 - {len(standard_coco_ids)-1}")
+        
+        return category_id_to_index
+
     def __call__(self, image, target):
         w, h = image.size
 
@@ -72,23 +100,57 @@ class ConvertCoco(object):
         boxes[:, 0::2].clamp_(min=0, max=w)
         boxes[:, 1::2].clamp_(min=0, max=h)
 
-        classes = [obj["category_id"] for obj in anno]
-        classes = torch.tensor(classes, dtype=torch.int64)
-
+        # 将原始类别ID映射到连续索引（使用标准COCO映射）
+        classes = []
+        valid_boxes = []
+        valid_anno = []
+        
+        for i, obj in enumerate(anno):
+            original_id = obj["category_id"]
+            if original_id in self.category_id_to_index:
+                classes.append(self.category_id_to_index[original_id])
+                valid_boxes.append(boxes[i])
+                valid_anno.append(obj)
+            else:
+                # 如果遇到未知类别ID，使用默认映射或跳过
+                # print(f"警告：未知类别ID {original_id}，跳过该标注")
+                continue
+        
+        if len(classes) == 0:
+            # 如果没有有效的标注，返回空的张量
+            classes = torch.tensor([], dtype=torch.int64)
+            boxes = torch.tensor([], dtype=torch.float32).reshape(-1, 4)
+        else:
+            classes = torch.tensor(classes, dtype=torch.int64)
+            boxes = torch.stack(valid_boxes)
+            anno = valid_anno
+        
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
         boxes = boxes[keep]
         classes = classes[keep]
-
+        
+        # 同步过滤有效的标注列表
+        valid_anno_filtered = []
+        for i, is_valid in enumerate(keep):
+            if is_valid:
+                valid_anno_filtered.append(valid_anno[i])
+        
         target = {}
         target["boxes"] = boxes
         target["labels"] = classes
         target["image_id"] = image_id
 
-        # for conversion to coco api
-        area = torch.tensor([obj["area"] for obj in anno])
-        iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
-        target["area"] = area[keep]
-        target["iscrowd"] = iscrowd[keep]
+        # for conversion to coco api - 使用过滤后的有效标注
+        if len(valid_anno_filtered) > 0:
+            area = torch.tensor([obj["area"] for obj in valid_anno_filtered])
+            iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in valid_anno_filtered])
+        else:
+            # 如果没有有效标注，创建空的张量
+            area = torch.tensor([], dtype=torch.float32)
+            iscrowd = torch.tensor([], dtype=torch.int64)
+            
+        target["area"] = area
+        target["iscrowd"] = iscrowd
 
         target["orig_size"] = torch.as_tensor([int(h), int(w)])
         target["size"] = torch.as_tensor([int(h), int(w)])

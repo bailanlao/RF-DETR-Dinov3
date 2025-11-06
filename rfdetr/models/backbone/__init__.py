@@ -42,7 +42,7 @@ class Joiner(nn.Sequential):
         for i, x_ in enumerate(x):
             p=self[1](x_, align_dim_orders=False).to(x_.tensors.dtype)
             pos.append(p)
-            x[i] = NestedTensor(x_.tensors+p, x_.mask)
+            # x[i] = NestedTensor(x_.tensors+p, x_.mask)
         return x, pos
 
     def forward_export(self, inputs: torch.Tensor):
@@ -51,7 +51,7 @@ class Joiner(nn.Sequential):
         for i, (feat, mask) in enumerate(zip(feats, masks)):
             pos=self[1](mask, align_dim_orders=False).to(feat.dtype)
             poss.append(pos)
-            feats[i] = feat + pos
+            # feats[i] = feat + pos
         return feats, None, poss
 
 

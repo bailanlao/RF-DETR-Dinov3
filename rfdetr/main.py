@@ -104,6 +104,10 @@ class Model:
                     f"num_classes mismatch: pretrain weights has {checkpoint_num_classes - 1} classes, but your model has {args.num_classes} classes\n"
                     f"reinitializing detection head with {checkpoint_num_classes - 1} classes"
                 )
+                print(f"dataset_file: {args.dataset_file}")
+                if args.dataset_file=='coco' and args.num_classes==80:
+                    print("COCO dataset use numclasses = 91")
+                    checkpoint_num_classes=91
                 self.reinitialize_detection_head(checkpoint_num_classes)
             # add support to exclude_keys
             # e.g., when load object365 pretrain, do not load `class_embed.[weight, bias]`
@@ -524,6 +528,10 @@ class Model:
 
         if args.run_test:
             print("Test model type:", type(model))
+            checkpoint_path = output_dir / 'checkpoint_best_total.pth'
+            if not checkpoint_path.exists():
+                print(f"Warning: Checkpoint file {checkpoint_path} not found. Skipping test evaluation.")
+                return
             best_state_dict = torch.load(output_dir / 'checkpoint_best_total.pth', map_location='cpu', weights_only=False)['model']
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 model.module.load_state_dict(best_state_dict)

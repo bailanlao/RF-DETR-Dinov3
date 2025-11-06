@@ -9,19 +9,20 @@
 
 import collections.abc
 import math
-from typing import Dict, List, Optional, Set, Tuple, Union,Callable
+from typing import Dict, List, Optional, Set, Tuple, Union, Callable
 
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-from dinov3.layers import LayerScale, Mlp, PatchEmbed, RMSNorm,  SwiGLUFFN
+from dinov3.layers import LayerScale, Mlp, PatchEmbed, RMSNorm, SwiGLUFFN
 from rfdetr.models.backbone.rope_position_encoding import RopePositionEmbedding
 from dinov3.layers.layer_scale import LayerScale
-from rfdetr.models.backbone.attention import SelfAttention,GroupDynamicScale
+from rfdetr.models.backbone.attention import SelfAttention, GroupDynamicScale
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 from transformers.activations import ACT2FN
-from transformers.modeling_outputs import BackboneOutput, BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput
+from transformers.modeling_outputs import BackboneOutput, BaseModelOutput, BaseModelOutputWithPooling, \
+    ImageClassifierOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
 from transformers.utils import (
@@ -37,7 +38,6 @@ from transformers.utils.backbone_utils import BackboneMixin
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils.backbone_utils import BackboneConfigMixin, get_aligned_output_features_output_indices
 
-
 logger = logging.get_logger(__name__)
 
 # Base docstring
@@ -52,8 +52,8 @@ dtype_dict = {
     "bf16": torch.bfloat16,
 }
 
-class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
 
+class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
     model_type = "dinov3_with_registers"
     DYNAMIC_CLASS_MAPPING: Dict[str, Dict[str, Callable[..., nn.Module]]] = {
         "norm_layer": {
@@ -64,7 +64,7 @@ class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
         },
         "ffn_layer": {
             "Mlp": Mlp,
-            "SwiGLUFFN": SwiGLUFFN, # hidden_features = d × 3 / 2
+            "SwiGLUFFN": SwiGLUFFN,  # hidden_features = d × 3 / 2
         },
         "act_layer": {
             "GELU": nn.GELU,
@@ -72,47 +72,48 @@ class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
             "ReLU": nn.ReLU,
         }
     }
+
     def __init__(
-        self,
-        hidden_size=768,
-        num_hidden_layers=12,
-        num_attention_heads=12,
-        mlp_ratio=4,
-        hidden_act="gelu",
-        hidden_dropout_prob=0.0,
-        attention_probs_dropout_prob=0.0,
-        initializer_range=0.02,
-        layer_norm_eps=1e-6,
-        image_size=224,
-        patch_size=16,
-        num_channels=3,
-        qkv_bias=True,
-        proj_bias=True,
-        layerscale_value=1.0,
-        drop_path_rate=0.0,
-        use_swiglu_ffn=False,
-        num_register_tokens=4,
-        out_features=None,
-        out_indices=None,
-        apply_layernorm=True,
-        reshape_hidden_states=True,
-        num_windows=1,
-        window_block_indexes=None,
-        gradient_checkpointing=False,
-        pos_embed_rope_base: float = 100.0,
-        pos_embed_rope_min_period: float | None = None,
-        pos_embed_rope_max_period: float | None = None,
-        pos_embed_rope_normalize_coords: Literal["min", "max", "separate"] = "separate",
-        pos_embed_rope_shift_coords: float | None = None,
-        pos_embed_rope_jitter_coords: float | None = None,
-        pos_embed_rope_rescale_coords: float | None = None,
-        pos_embed_rope_dtype: str = "fp32",
-        dynamic_norm_layer: str | None = None,
-        dynamic_attn_class: str | None = None,
-        dynamic_ffn_layer: str | None = None,
-        dynamic_act_layer: str | None = None,
-        use_fdam: bool = False,
-        **kwargs,
+            self,
+            hidden_size=768,
+            num_hidden_layers=12,
+            num_attention_heads=12,
+            mlp_ratio=4,
+            hidden_act="gelu",
+            hidden_dropout_prob=0.0,
+            attention_probs_dropout_prob=0.0,
+            initializer_range=0.02,
+            layer_norm_eps=1e-6,
+            image_size=224,
+            patch_size=16,
+            num_channels=3,
+            qkv_bias=True,
+            proj_bias=True,
+            layerscale_value=1.0,
+            drop_path_rate=0.0,
+            use_swiglu_ffn=False,
+            num_register_tokens=4,
+            out_features=None,
+            out_indices=None,
+            apply_layernorm=True,
+            reshape_hidden_states=True,
+            num_windows=1,
+            window_block_indexes=None,
+            gradient_checkpointing=False,
+            pos_embed_rope_base: float = 100.0,
+            pos_embed_rope_min_period: float | None = None,
+            pos_embed_rope_max_period: float | None = None,
+            pos_embed_rope_normalize_coords: Literal["min", "max", "separate"] = "separate",
+            pos_embed_rope_shift_coords: float | None = None,
+            pos_embed_rope_jitter_coords: float | None = None,
+            pos_embed_rope_rescale_coords: float | None = None,
+            pos_embed_rope_dtype: str = "fp32",
+            dynamic_norm_layer: str | None = None,
+            dynamic_attn_class: str | None = None,
+            dynamic_ffn_layer: str | None = None,
+            dynamic_act_layer: str | None = None,
+            use_fdam: bool = False,
+            **kwargs,
     ):
         super().__init__(**kwargs)
 
@@ -149,37 +150,43 @@ class WindowedDinov3WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
         self.pos_embed_rope_jitter_coords = pos_embed_rope_jitter_coords
         self.pos_embed_rope_rescale_coords = pos_embed_rope_rescale_coords
         self.pos_embed_rope_dtype = pos_embed_rope_dtype
-        self.window_block_indexes = list(range(num_hidden_layers)) if window_block_indexes is None else window_block_indexes
+        self.window_block_indexes = list(
+            range(num_hidden_layers)) if window_block_indexes is None else window_block_indexes
         self.gradient_checkpointing = gradient_checkpointing
         self.use_fdam = use_fdam
 
         if dynamic_norm_layer is not None:
             if dynamic_norm_layer not in self.DYNAMIC_CLASS_MAPPING["norm_layer"]:
-                raise ValueError(f"不支持的归一化层：{dynamic_norm_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['norm_layer'].keys())}")
+                raise ValueError(
+                    f"不支持的归一化层：{dynamic_norm_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['norm_layer'].keys())}")
             self.norm_layer = self.DYNAMIC_CLASS_MAPPING["norm_layer"][dynamic_norm_layer]
         else:
             self.norm_layer = nn.LayerNorm
 
         if dynamic_attn_class is not None:
             if dynamic_attn_class not in self.DYNAMIC_CLASS_MAPPING["attn_class"]:
-                raise ValueError(f"不支持的注意力层：{dynamic_attn_class}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['attn_class'].keys())}")
+                raise ValueError(
+                    f"不支持的注意力层：{dynamic_attn_class}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['attn_class'].keys())}")
             self.attn_class = self.DYNAMIC_CLASS_MAPPING["attn_class"][dynamic_attn_class]
         else:
-            self.attn_class = SelfAttention  
+            self.attn_class = SelfAttention
 
         if dynamic_ffn_layer is not None:
             if dynamic_ffn_layer not in self.DYNAMIC_CLASS_MAPPING["ffn_layer"]:
-                raise ValueError(f"不支持的FFN层：{dynamic_ffn_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['ffn_layer'].keys())}")
+                raise ValueError(
+                    f"不支持的FFN层：{dynamic_ffn_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['ffn_layer'].keys())}")
             self.ffn_layer = self.DYNAMIC_CLASS_MAPPING["ffn_layer"][dynamic_ffn_layer]
         else:
             self.ffn_layer = SwiGLUFFN if self.use_swiglu_ffn else Mlp
 
         if dynamic_act_layer is not None:
             if dynamic_act_layer not in self.DYNAMIC_CLASS_MAPPING["act_layer"]:
-                raise ValueError(f"不支持的激活函数：{dynamic_act_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['act_layer'].keys())}")
+                raise ValueError(
+                    f"不支持的激活函数：{dynamic_act_layer}，可选值：{list(self.DYNAMIC_CLASS_MAPPING['act_layer'].keys())}")
             self.act_layer = self.DYNAMIC_CLASS_MAPPING["act_layer"][dynamic_act_layer]
         else:
             self.act_layer = nn.GELU
+
 
 class Dinov3WithRegistersPatchEmbeddings(nn.Module):
     """
@@ -224,7 +231,8 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
 
         self.cls_token = nn.Parameter(torch.randn(1, 1, config.hidden_size))
         self.mask_token = nn.Parameter(torch.zeros(1, config.hidden_size))
-        self.register_tokens = nn.Parameter(torch.zeros(1, config.num_register_tokens, config.hidden_size)) if config.num_register_tokens > 0 else None
+        self.register_tokens = nn.Parameter(
+            torch.zeros(1, config.num_register_tokens, config.hidden_size)) if config.num_register_tokens > 0 else None
         self.patch_embeddings = Dinov3WithRegistersPatchEmbeddings(config)
         num_patches = self.patch_embeddings.num_patches
         self.position_embeddings = nn.Parameter(torch.randn(1, num_patches + 1, config.hidden_size))
@@ -259,7 +267,7 @@ class WindowedDinov3WithRegistersEmbeddings(nn.Module):
         width = width // self.config.patch_size
 
         # Reshape for interpolation
-        sqrt_num_positions = torch_int(num_positions**0.5)
+        sqrt_num_positions = torch_int(num_positions ** 0.5)
         patch_pos_embed = patch_pos_embed.reshape(1, sqrt_num_positions, sqrt_num_positions, dim)
         patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
 
@@ -349,7 +357,7 @@ class Dinov3WithRegistersSelfAttention(nn.Module):
         return x.permute(0, 2, 1, 3)
 
     def forward(
-        self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
+            self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         mixed_query_layer = self.query(hidden_states)
 
@@ -390,7 +398,7 @@ class Dinov3WithRegistersSdpaSelfAttention(Dinov3WithRegistersSelfAttention):
         self.attention_probs_dropout_prob = config.attention_probs_dropout_prob
 
     def forward(
-        self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
+            self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
@@ -469,10 +477,10 @@ class Dinov3WithRegistersAttention(nn.Module):
         self.pruned_heads = self.pruned_heads.union(heads)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
+            self,
+            hidden_states: torch.Tensor,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: bool = False,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         self_outputs = self.attention(hidden_states, head_mask, output_attentions)
 
@@ -486,7 +494,6 @@ class Dinov3WithRegistersSdpaAttention(Dinov3WithRegistersAttention):
     def __init__(self, config: WindowedDinov3WithRegistersConfig) -> None:
         super().__init__(config)
         self.attention = Dinov3WithRegistersSdpaSelfAttention(config)
-
 
 
 def drop_path(input: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -> torch.Tensor:
@@ -526,11 +533,11 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
         attn_class: Callable[..., nn.Module] = config.attn_class if hasattr(config, 'attn_class') else SelfAttention
         ffn_layer: Callable[..., nn.Module] = config.ffn_layer if hasattr(config, 'ffn_layer') else Mlp
         act_layer: Callable[..., nn.Module] = config.act_layer if hasattr(config, 'act_layer') else nn.GELU
-        self.num_register_tokens=config.num_register_tokens
-        self.norm1 = norm_layer(config.hidden_size, eps=config.layer_norm_eps) # d
+        self.num_register_tokens = config.num_register_tokens
+        self.norm1 = norm_layer(config.hidden_size, eps=config.layer_norm_eps)  # d
         self.attn = attn_class(
-            config.hidden_size, 
-            num_heads=config.num_attention_heads, 
+            config.hidden_size,
+            num_heads=config.num_attention_heads,
             qkv_bias=config.qkv_bias,
             proj_bias=config.proj_bias,
             attn_drop=config.attention_probs_dropout_prob,
@@ -544,44 +551,44 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
         self.norm2 = norm_layer(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = ffn_layer(
             config.hidden_size,
-            hidden_features=config.mlp_ratio*config.hidden_size,
+            hidden_features=config.mlp_ratio * config.hidden_size,
             act_layer=act_layer,
             drop=config.hidden_dropout_prob,
             bias=config.ffn_bias,
         )
         self.ls2 = LayerScale(config.hidden_size)
-        self.use_fdam=config.use_fdam
-        if config.use_fdam:
-            self.gamma_1 = nn.Parameter(1e-4 * torch.ones(config.hidden_size))
-            self.gamma_2 = nn.Parameter(1e-4 * torch.ones(config.hidden_size))
-            self.freq_scale_1 = GroupDynamicScale(dim=config.hidden_size)
-            self.freq_scale_2 = GroupDynamicScale(dim=config.hidden_size)
+        self.use_fdam = config.use_fdam
+        # if config.use_fdam:
+        #     self.gamma_1 = nn.Parameter(1e-4 * torch.ones(config.hidden_size))
+        #     self.gamma_2 = nn.Parameter(1e-4 * torch.ones(config.hidden_size))
+        #     self.freq_scale_1 = GroupDynamicScale(dim=config.hidden_size)
+        #     self.freq_scale_2 = GroupDynamicScale(dim=config.hidden_size)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        run_full_attention: bool = False,
-        orig_h: int = 0,
-        orig_w: int = 0,
-        win_h: int = 0,
-        win_w: int = 0,
-        rope_embed: nn.Module = None,
+            self,
+            hidden_states: torch.Tensor,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: bool = False,
+            run_full_attention: bool = False,
+            orig_h: int = 0,
+            orig_w: int = 0,
+            win_h: int = 0,
+            win_w: int = 0,
+            rope_embed_full: list = None,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         assert head_mask is None, "head_mask is not supported for windowed attention"
         assert not output_attentions, "output_attentions is not supported for windowed attention"
         shortcut = hidden_states
-        num_wins=self.num_windows
+        num_wins = self.num_windows
         if run_full_attention:
             # reshape x to remove windows
-            B, HW, C = hidden_states.shape # HW: cls+reg+patch
+            B, HW, C = hidden_states.shape  # HW: cls+reg+patch
             cls_per_window = 1
             reg_per_window = self.num_register_tokens
             patch_per_window = HW - cls_per_window - reg_per_window
             num_windows_squared = num_wins ** 2
             B_new = B // num_windows_squared
-            windows = hidden_states.view(B_new, num_windows_squared , HW, C)
+            windows = hidden_states.view(B_new, num_windows_squared, HW, C)
             all_cls = windows[:, :, 0:cls_per_window, :]
             all_reg = windows[:, :, cls_per_window:cls_per_window + reg_per_window, :]
             all_patch = windows[:, :, cls_per_window + reg_per_window:, :]
@@ -589,14 +596,13 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             flattened_reg = all_reg.reshape(B_new, num_windows_squared * reg_per_window, C)
             flattened_patch = all_patch.reshape(B_new, num_windows_squared * patch_per_window, C)
             hidden_states = torch.cat([flattened_cls, flattened_reg, flattened_patch], dim=1)
-            
-            sin_full, cos_full = rope_embed(H=orig_h, W=orig_w)  # HW,D
-            sin = sin_full.unsqueeze(0).repeat(B_new, 1, 1)  
+
+            sin_full, cos_full = rope_embed_full  # HW,D
+            sin = sin_full.unsqueeze(0).repeat(B_new, 1, 1)
             cos = cos_full.unsqueeze(0).repeat(B_new, 1, 1)
             rope_sincos = (sin, cos)
         else:
-            full_rope_sincos = rope_embed(H=orig_h, W=orig_w)  # sin: [orig_HW, D], cos: [orig_HW, D]
-            sin_full, cos_full = full_rope_sincos
+            sin_full, cos_full = rope_embed_full
             D = sin_full.shape[-1]
 
             sin_full_grid = sin_full.view(orig_h, orig_w, D)
@@ -607,7 +613,7 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             sin_windows = []
             cos_windows = []
 
-            for i in range(num_wins):  
+            for i in range(num_wins):
                 for j in range(num_wins):
                     h_start = i * win_patch_h
                     h_end = h_start + win_patch_h
@@ -632,13 +638,13 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             sin_expanded = sin_stacked.unsqueeze(0).repeat(B_original, 1, 1, 1).flatten(0, 1)
             cos_expanded = cos_stacked.unsqueeze(0).repeat(B_original, 1, 1, 1).flatten(0, 1)
             rope_sincos = (sin_expanded, cos_expanded)
-        
+
         self_attention_outputs = self.attn(
             self.norm1(hidden_states),  # in Dinov3WithRegisters, layernorm is applied before self-attention
             rope=rope_sincos,
             output_attentions=output_attentions,
         )
-        attention_output = self_attention_outputs[0] # [B_total, N, C]
+        attention_output = self_attention_outputs[0]  # [B_total, N, C]
 
         if run_full_attention:
             # reshape x to add windows back
@@ -646,32 +652,33 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
             num_windows_squared = self.num_windows ** 2
             cls_per_window = 1
             reg_per_window = self.num_register_tokens
-            window_seq_length = (HW // num_windows_squared) 
-            patch_per_window = window_seq_length - cls_per_window - reg_per_window 
-            total_cls = num_windows_squared * cls_per_window  
-            total_reg = num_windows_squared * reg_per_window  
+            window_seq_length = (HW // num_windows_squared)
+            patch_per_window = window_seq_length - cls_per_window - reg_per_window
+            total_cls = num_windows_squared * cls_per_window
+            total_reg = num_windows_squared * reg_per_window
 
             all_cls = hidden_states[:, :total_cls, :].reshape(B, num_windows_squared, cls_per_window, C)
-            all_reg = hidden_states[:, total_cls:total_cls+total_reg, :].reshape(B, num_windows_squared, reg_per_window, C)
-            all_patch = hidden_states[:, total_cls+total_reg:, :].reshape(B, num_windows_squared, patch_per_window, C)
-            
+            all_reg = hidden_states[:, total_cls:total_cls + total_reg, :].reshape(B, num_windows_squared,
+                                                                                   reg_per_window, C)
+            all_patch = hidden_states[:, total_cls + total_reg:, :].reshape(B, num_windows_squared, patch_per_window, C)
+
             windows = torch.cat([all_cls, all_reg, all_patch], dim=2)
-            
+
             hidden_states = windows.reshape(B * num_windows_squared, window_seq_length, C)
-            
+
             attention_output = attention_output.reshape(B, num_windows_squared, window_seq_length, C)
             attention_output = attention_output.reshape(B * num_windows_squared, window_seq_length, C)
-        
-        if self.use_fdam:
-            B, L, C = attention_output.shape
-            L_img=win_h*win_w
-            patch_attention_output = attention_output[:, L-L_img:, :]
-            patch_attention_output = patch_attention_output.reshape(B, win_h, win_w, C)
-            # [B, C, win_h, win_w]
-            patch_attention_output = patch_attention_output.permute(0, 3, 1, 2).contiguous()
-            patch_att_scaled = self.freq_scale_1(patch_attention_output) + patch_attention_output
-            patch_att_scaled = patch_att_scaled.permute(0, 2, 3, 1).contiguous().reshape(B, L_img, C)
-            attention_output[:, L-L_img:, :] = self.gamma_1 * patch_att_scaled
+
+        # if self.use_fdam:
+        #     B, L, C = attention_output.shape
+        #     L_img = win_h * win_w
+        #     patch_attention_output = attention_output[:, L - L_img:, :]
+        #     patch_attention_output = patch_attention_output.reshape(B, win_h, win_w, C)
+        #     # [B, C, win_h, win_w]
+        #     patch_attention_output = patch_attention_output.permute(0, 3, 1, 2).contiguous()
+        #     patch_att_scaled = self.freq_scale_1(patch_attention_output) + patch_attention_output
+        #     patch_att_scaled = patch_att_scaled.permute(0, 2, 3, 1).contiguous().reshape(B, L_img, C)
+        #     attention_output[:, L - L_img:, :] = self.gamma_1 * patch_att_scaled
 
         attention_output = self.ls1(attention_output)
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
@@ -683,21 +690,22 @@ class WindowedDinov3WithRegistersLayer(nn.Module):
         layer_output = self.norm2(hidden_states)
         layer_output = self.mlp(layer_output)
         layer_output = self.ls2(layer_output)
-        if self.use_fdam:
-            B, L, C = layer_output.shape
-            L_img=win_h*win_w
-            patch_attention_output = layer_output[:, L-L_img:, :]
-            patch_attention_output = patch_attention_output.reshape(B, win_h, win_w, C)
-            # [B, C, win_h, win_w]
-            patch_attention_output = patch_attention_output.permute(0, 3, 1, 2).contiguous()
-            patch_att_scaled = self.freq_scale_2(patch_attention_output) + patch_attention_output
-            patch_att_scaled = patch_att_scaled.permute(0, 2, 3, 1).contiguous().reshape(B, L_img, C)
-            layer_output[:, L-L_img:, :] = self.gamma_2*patch_att_scaled
-        
+        # if self.use_fdam:
+        #     B, L, C = layer_output.shape
+        #     L_img = win_h * win_w
+        #     patch_attention_output = layer_output[:, L - L_img:, :]
+        #     patch_attention_output = patch_attention_output.reshape(B, win_h, win_w, C)
+        #     # [B, C, win_h, win_w]
+        #     patch_attention_output = patch_attention_output.permute(0, 3, 1, 2).contiguous()
+        #     patch_att_scaled = self.freq_scale_2(patch_attention_output) + patch_attention_output
+        #     patch_att_scaled = patch_att_scaled.permute(0, 2, 3, 1).contiguous().reshape(B, L_img, C)
+        #     layer_output[:, L - L_img:, :] = self.gamma_2 * patch_att_scaled
+
         # second residual connection
         layer_output = layer_output + hidden_states
         outputs = (layer_output,) + outputs
         return outputs
+
 
 class WindowedDinov3WithRegistersEncoder(nn.Module):
     def __init__(self, config: WindowedDinov3WithRegistersConfig) -> None:
@@ -707,32 +715,32 @@ class WindowedDinov3WithRegistersEncoder(nn.Module):
         self.gradient_checkpointing = config.gradient_checkpointing
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        orig_h: int,
-        orig_w: int,
-        win_h: int,
-        win_w: int,
-        rope_embed: nn.Module,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
+            self,
+            hidden_states: torch.Tensor,
+            orig_h: int,
+            orig_w: int,
+            win_h: int,
+            win_w: int,
+            rope_embed: nn.Module,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: bool = False,
+            output_hidden_states: bool = False,
+            return_dict: bool = True,
     ) -> Union[tuple, BaseModelOutput]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
-
+        full_rope_sincos = rope_embed(H=orig_h, W=orig_w)
         for i, layer_module in enumerate(self.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
             if i > int(self.config.out_features[-1][5:]):
                 # early stop if we have reached the last output feature
                 break
-            
+
             run_full_attention = i not in self.config.window_block_indexes
 
             layer_head_mask = head_mask[i] if head_mask is not None else None
-            
+
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     layer_module.__call__,
@@ -744,10 +752,11 @@ class WindowedDinov3WithRegistersEncoder(nn.Module):
                     orig_w,
                     win_h,
                     win_w,
-                    rope_embed,
+                    full_rope_sincos,
                 )
             else:
-                layer_outputs = layer_module(hidden_states, layer_head_mask, output_attentions, run_full_attention, orig_h, orig_w, win_h, win_w, rope_embed)
+                layer_outputs = layer_module(hidden_states, layer_head_mask, output_attentions, run_full_attention,
+                                             orig_h, orig_w, win_h, win_w, full_rope_sincos)
 
             hidden_states = layer_outputs[0]
 
@@ -807,7 +816,6 @@ class WindowedDinov3WithRegistersPreTrainedModel(PreTrainedModel):
 
 
 _EXPECTED_OUTPUT_SHAPE = [1, 257, 768]
-
 
 Dinov3_WITH_REGISTERS_START_DOCSTRING = r"""
     This model is a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass. Use it
@@ -884,13 +892,13 @@ class WindowedDinov3WithRegistersModel(WindowedDinov3WithRegistersPreTrainedMode
         expected_output=_EXPECTED_OUTPUT_SHAPE,
     )
     def forward(
-        self,
-        pixel_values: Optional[torch.Tensor] = None,
-        bool_masked_pos: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            pixel_values: Optional[torch.Tensor] = None,
+            bool_masked_pos: Optional[torch.Tensor] = None,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -990,13 +998,13 @@ class WindowedDinov3WithRegistersForImageClassification(WindowedDinov3WithRegist
         expected_output=_IMAGE_CLASS_EXPECTED_OUTPUT,
     )
     def forward(
-        self,
-        pixel_values: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            pixel_values: Optional[torch.Tensor] = None,
+            head_mask: Optional[torch.Tensor] = None,
+            labels: Optional[torch.Tensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[tuple, ImageClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1060,7 +1068,6 @@ class WindowedDinov3WithRegistersForImageClassification(WindowedDinov3WithRegist
         )
 
 
-
 @add_start_docstrings(
     """
     Dinov3WithRegisters backbone, to be used with frameworks like DETR and MaskFormer.
@@ -1093,7 +1100,7 @@ class WindowedDinov3WithRegistersBackbone(WindowedDinov3WithRegistersPreTrainedM
         # Initialize weights and apply final processing
         self.post_init()
 
-    def init(self): #TODO
+    def init(self):  # TODO
         self.rope_embed._init_weights()
 
     def get_input_embeddings(self) -> Dinov3WithRegistersPatchEmbeddings:
@@ -1102,11 +1109,11 @@ class WindowedDinov3WithRegistersBackbone(WindowedDinov3WithRegistersPreTrainedM
     @add_start_docstrings_to_model_forward(Dinov3_WITH_REGISTERS_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=BackboneOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
-        self,
-        pixel_values: torch.Tensor, # B C H W
-        output_hidden_states: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            pixel_values: torch.Tensor,  # B C H W
+            output_hidden_states: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> BackboneOutput:
         """
         Returns:
@@ -1144,24 +1151,25 @@ class WindowedDinov3WithRegistersBackbone(WindowedDinov3WithRegistersPreTrainedM
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        embedding_output,orig_h,orig_w,win_h,win_w = self.embeddings(pixel_values) # 
+        embedding_output, orig_h, orig_w, win_h, win_w = self.embeddings(pixel_values)  #
         outputs = self.encoder(
-            embedding_output, orig_h, orig_w, win_h, win_w, self.rope_embed, output_hidden_states=True, output_attentions=output_attentions, return_dict=return_dict
+            embedding_output, orig_h, orig_w, win_h, win_w, self.rope_embed, output_hidden_states=True,
+            output_attentions=output_attentions, return_dict=return_dict
         )
 
-        hidden_states = outputs.hidden_states if return_dict else outputs[1] # all hidden states
+        hidden_states = outputs.hidden_states if return_dict else outputs[1]  # all hidden states
         # for i,hidden_state in enumerate(hidden_states):
         #     print(f"{i}:",hidden_state[0])
         feature_maps = ()
         for stage, hidden_state in zip(self.stage_names, hidden_states):
             if stage in self.out_features:
-                if self.config.apply_layernorm: # True
+                if self.config.apply_layernorm:  # True
                     hidden_state = self.layernorm(hidden_state)
-                if self.config.reshape_hidden_states: # True
-                    hidden_state = hidden_state[:, self.num_register_tokens + 1 :]
+                if self.config.reshape_hidden_states:  # True
+                    hidden_state = hidden_state[:, self.num_register_tokens + 1:]
                     # this was actually a bug in the original implementation that we copied here,
                     # cause normally the order is height, width
-                    
+
                     B_img, _, H_img, W_img = pixel_values.shape
                     ps = self.config.patch_size
                     H_grid = H_img // ps
@@ -1189,7 +1197,7 @@ class WindowedDinov3WithRegistersBackbone(WindowedDinov3WithRegistersPreTrainedM
 
                     # → (B, C, H_grid, W_grid)
                     hidden_state = x.permute(0, 3, 1, 2).contiguous()
-                
+
                 feature_maps += (hidden_state,)
 
         if not return_dict:
